@@ -20,11 +20,20 @@
 **下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
 （`novel-downloader-v1.0.1-win64.zip`，约 55 KB）
 
-> 如果打不开 github.com（国内网络常见），release 附件也可以走 API 直链下载，
-> 把浏览器地址换成这种形式即可：
-> `https://api.github.com/repos/George01230123/biquga-downloader/releases/assets/<附件ID>`
-> （附件 ID 在 `https://api.github.com/repos/George01230123/biquga-downloader/releases/tags/v1.0.1` 里能查到；
-> 实测 `github.com` 连不上时 `api.github.com` 往往还是通的）
+> **打不开 github.com？**（国内网络常见，本项目开发期间实测断过两次）
+> `api.github.com` 通常还是通的，粘这段到 PowerShell 就能下（不用改任何东西）：
+>
+> ```powershell
+> $base = 'https://api.github.com/repos/George01230123/biquga-downloader'
+> $rel  = Invoke-RestMethod "$base/releases/latest" -Headers @{ 'User-Agent' = 'ps' }
+> Invoke-WebRequest $rel.assets[0].url `
+>   -Headers @{ 'User-Agent' = 'ps'; 'Accept' = 'application/octet-stream' } `
+>   -OutFile "$env:USERPROFILE\Downloads\novel-downloader.zip"
+> ```
+>
+> 注意：**别把 api 链接直接粘进浏览器地址栏** —— 那个接口默认返回一段 JSON 元信息，
+> 不是文件（要带 `Accept: application/octet-stream` 才给文件本体）。
+> 更多方式与排查见 [`docs/下载与网络问题.md`](docs/下载与网络问题.md)。
 
 1. 解压到任意目录（别放 `C:\Program Files`，那里没有写权限）
 2. 双击 **`start.bat`**（它会转交给 `start.ps1`；也可以直接双击 exe）
@@ -151,7 +160,8 @@ src/                 界面与入口
 tests/               自测：OfflineTests.cs（离线单测）、EdgeTest.cs、TestMain.cs
 tools/               开发辅助：QuickDownload.cs（批量下载）、DiagMobile.cs（诊断）
 build/               csproj（CI 用）、app.manifest、fix-encoding.ps1（编码守护）
-docs/                详细文档：[架构](docs/架构.md)、[站点坑](docs/站点坑.md)、[GitHub 准备清单](docs/GITHUB准备清单.md)
+docs/                详细文档：[架构](docs/架构.md)、[站点坑](docs/站点坑.md)、
+                     [下载与网络问题](docs/下载与网络问题.md)、[GitHub 准备清单](docs/GITHUB准备清单.md)
 ```
 
 ---
