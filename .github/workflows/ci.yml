@@ -73,12 +73,29 @@ jobs:
           New-Item -ItemType Directory -Force pkg | Out-Null
           # dotnet 编出来的是 ASCII 名，打包时改成中文名 —— start.bat / start.ps1 找的就是它
           Move-Item dist/NovelDownloader.exe 'pkg/小说下载器.exe' -Force
-          Copy-Item README.md pkg/
-          Copy-Item start.bat, start.ps1 pkg/
-          if (Test-Path LICENSE) { Copy-Item LICENSE pkg/ }
+          Copy-Item README.md, NOTICE.md, LICENSE, start.bat, start.ps1 pkg/
+          $zip = "novel-downloader-${{ github.ref_name }}-win64.zip"
+          Compress-Archive -Path pkg/* -DestinationPath $zip -Force
           Get-ChildItem pkg | Select-Object Name, Length
-          Compress-Archive -Path pkg/* -DestinationPath "novel-downloader-${{ github.ref_name }}-win64.zip" -Force
-          Get-Item "novel-downloader-${{ github.ref_name }}-win64.zip" | Select-Object Name, Length
+          Get-Item $zip | Select-Object Name, Length
+
+      # 自检：包里必须正好是这 6 个文件，多了少了都直接失败。
+      # （踩过的坑：v1.0.0 的包漏了 NOTICE.md —— 打包清单写死在这里就不会再漏）
+      - name: Verify package contents
+        shell: pwsh
+        run: |
+          $zip = "novel-downloader-${{ github.ref_name }}-win64.zip"
+          $tmp = Join-Path $env:RUNNER_TEMP 'verify'
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          $expect = @('LICENSE', 'NOTICE.md', 'README.md', 'start.bat', 'start.ps1', '小说下载器.exe')
+          $got = (Get-ChildItem $tmp | Select-Object -ExpandProperty Name) | Sort-Object
+          Write-Host ("包内文件：" + ($got -join ', '))
+          $missing = $expect | Where-Object { $got -notcontains $_ }
+          $extra = $got | Where-Object { $expect -notcontains $_ }
+          if ($missing) { throw ("包里缺少文件：" + ($missing -join ', ')) }
+          if ($extra) { throw ("包里多了不该有的文件：" + ($extra -join ', ')) }
+          if (-not (Test-Path (Join-Path $tmp 'start.ps1'))) { throw 'start.ps1 缺失，双击 start.bat 会失败' }
+          Write-Host '包内容自检通过'
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

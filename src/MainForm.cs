@@ -67,7 +67,7 @@ namespace TomatoBiquga
         public MainForm()
         {
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0（免安装单文件版）";
+            Text = "小说下载器 v1.0.1（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
