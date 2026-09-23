@@ -17,7 +17,16 @@
 
 ## 一、快速开始
 
-1. 下载 Release 里的压缩包，解压到任意目录（别放 `C:\Program Files`，那里没有写权限）
+**下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
+（`novel-downloader-v1.0.1-win64.zip`，约 55 KB）
+
+> 如果打不开 github.com（国内网络常见），release 附件也可以走 API 直链下载，
+> 把浏览器地址换成这种形式即可：
+> `https://api.github.com/repos/George01230123/biquga-downloader/releases/assets/<附件ID>`
+> （附件 ID 在 `https://api.github.com/repos/George01230123/biquga-downloader/releases/tags/v1.0.1` 里能查到；
+> 实测 `github.com` 连不上时 `api.github.com` 往往还是通的）
+
+1. 解压到任意目录（别放 `C:\Program Files`，那里没有写权限）
 2. 双击 **`start.bat`**（它会转交给 `start.ps1`；也可以直接双击 exe）
 3. 站点选 **笔趣阁（移动版·快）**，输入中文书名，例如 `牧神记`
 4. 点 **搜索** → 在结果里**双击**目标书（或选中后点「载入目录」）

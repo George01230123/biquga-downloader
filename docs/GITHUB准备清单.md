@@ -20,35 +20,57 @@
 | P2 | LICENSE / 命名 / 版权人占位符 | ✅ 已定 | `LICENSE` = MIT + 中文补充说明；产品名 `novel-downloader`，窗口标题「小说下载器 v1.0」；`AssemblyInfo` 版权人 = `novel-downloader contributors` |
 | P3 | 其余（EPUB、插件化、异步重写） | ⬜ 待做 | 见文末优先级 |
 
-### 现在就可以执行的发布步骤
+### ✅ 已经发布完成（2026-09-23）
+
+| 项目 | 结果 |
+| --- | --- |
+| 仓库 | https://github.com/George01230123/biquga-downloader （public，默认分支 main） |
+| Release | **v1.0.1** —— https://github.com/George01230123/biquga-downloader/releases/tag/v1.0.1 |
+| 附件 | `novel-downloader-v1.0.1-win64.zip`（56,219 字节，6 个文件） |
+| CI | run #1~#6 **全部 success**（build + 离线单测 161 项 + release 打包自检） |
+| 协议识别 | GitHub 显示 **MIT** ✅（LICENSE 保持标准原文；说明挪到 `NOTICE.md`） |
+| 端到端验证 | 走 API 把 release 附件下回来 → 解压 → 双击 `start.bat` → 界面起来 ✅ |
+
+发布过程中踩到的三个坑（都已修）：
+
+1. **中文描述变成乱码**：PowerShell 的 `ConvertTo-Json` + `curl --data-binary` 会把中文按系统
+   代码页(GBK)编码，GitHub 收到是「绗旇叮闃佸皬璇?」。必须显式 `UTF8Encoding($false)` 写成字节再传。
+2. **`license=NOASSERTION`**：MIT 原文后面追加自定义说明会让 GitHub 的 licensee 认不出来。
+   拆成 `LICENSE`（标准原文）+ `NOTICE.md`（中文补充 + 免责）后识别为 MIT。
+3. **Release 包漏文件**：v1.0.0 的包里没有 `NOTICE.md`（它是在打 tag 之后才建的）。
+   现在 CI 增加 `Verify package contents` 步骤：**包内必须正好 6 个文件，多了少了直接失败**。
+   另外 `v1.0.0` 那个空 release 已删除，只保留 v1.0.1，避免用户下到空包。
+
+> 环境提示：这台机器上 `github.com` 会间歇性连不上（`curl: (28) Failed to connect ... after 21s`），
+> 但 `api.github.com` 一直通（0.2 秒）。push 失败时先等一会或重试，release 附件也能走 API 直链下载。
+
+### 后续发版的步骤
 
 ```powershell
 cd "D:\harness work\TomatoBiquga"
 
-# 0) 先自检一遍（应输出 通过 161/161，退出码 0）
+# 0) 自检（应输出 通过 161/161，退出码 0）
 .\dist\_offlinetests.exe
 
-# 1) 提交（已确认只有 33 个文件：源码 / 文档 / 脚本，无 exe、无正文、无缓存）
+# 1) 改版本号：src\AssemblyInfo.cs 三处 + MainForm 标题
+# 2) 提交并推送
 git add -A
-git commit -m "feat: 小说下载器 v1.0.0 —— 免安装单文件，笔趣阁移动版 1000 章约 10 分钟"
+git commit -m "fix: ..."
+git push origin main
 
-# 2) 在 GitHub 上建一个空仓库，名字建议 biquga-downloader（别用带商标的名字）
-git remote add origin https://github.com/<你的ID>/biquga-downloader.git
-git push -u origin main
-
-# 3) 打 tag → CI 的 release job 会自动编译并把 zip 挂到 Release
-git tag v1.0.0
-git push origin v1.0.0
+# 3) 打 tag → CI 自动编译 + 包内容自检 + 挂到 Release
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
-**仓库设置建议**（网页上点几下）：
+**仓库设置**（已完成，记录备查）：
 
-| 位置 | 填什么 |
+| 位置 | 内容 |
 | --- | --- |
-| About → Description | `笔趣阁小说下载器：中文书名搜索 → 勾选章节 → 导出 UTF-8 TXT。免安装单文件 exe，零运行时依赖。` |
-| About → Topics | `csharp` `winforms` `net-framework` `novel-downloader` `biquga` `scraper` `txt` |
-| Settings → Features | 关掉 Wiki；不想答疑就把 Discussions 也关掉，README 里已写明"仅接受 PR"口径 |
-| Issue 模板 | 建议要求填：版本号（右键 exe 属性可见）、站点、书名、目录页 URL、日志末 50 行 |
+| About → Description | 笔趣阁小说下载器：中文书名搜索 → 勾选章节 → 导出 UTF-8 TXT。免安装单文件 exe，零运行时依赖。（已填） |
+| About → Topics | `biquga` `csharp` `net-framework` `novel-downloader` `scraper` `txt` `winforms`（已填） |
+| Settings → Features | Wiki / Projects / Discussions 全部关闭（已设） |
+| Issue 模板 | ⬜ 还没加。建议要求填：版本号、站点、书名、目录页 URL、日志末 50 行 |
 
 ---
 
