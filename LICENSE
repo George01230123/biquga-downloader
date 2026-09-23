@@ -19,34 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-================================================================================
-附加说明（中文，与上面的 MIT 条款同等重要）
-================================================================================
-
-1. 授权范围
-   本授权只覆盖本仓库中的**源代码**（以及随仓库分发的构建脚本、文档）。
-
-2. 不含第三方二进制
-   本仓库**不包含**任何第三方程序的二进制文件（例如第三方番茄小说下载器的
-   exe）。那些文件由其各自的权利人授权，不在本授权范围内；本项目也不会
-   代为分发。
-
-3. 不含任何小说内容
-   本仓库**不提供、不托管、不分发任何小说正文**。使用本工具下载到的文本，
-   其版权归原作者与发布站点所有，**不在本授权范围内**。
-
-4. 使用限制与免责
-   本工具仅解析**公开可访问**的网页，不破解 DRM、不绕过登录或付费墙、
-   不内置任何正文数据源。请仅将下载内容用于**个人离线阅读**，请勿传播、
-   勿商用，并在合理时间内自行删除。
-   站点结构与访问策略由第三方决定，本工具可能随时失效。使用者应自行确认
-   其使用行为符合所在地法律法规以及目标站点的服务条款；因使用本软件产生
-   的任何后果，由使用者自行承担，作者不承担任何责任。
-
---------------------------------------------------------------------------------
-English note: This license covers the source code in this repository only. It does
-not cover third-party binaries (which are not redistributed here) nor any book
-content downloaded by the tool. The tool only parses publicly accessible pages,
-does not break DRM, and does not bypass logins or paywalls. Downloaded text is for
-personal offline reading only; do not redistribute. Use at your own risk.

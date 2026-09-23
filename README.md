@@ -208,7 +208,9 @@ do not redistribute. Third-party binaries are not redistributed by this reposito
 
 ## 九、License
 
-代码采用 **MIT**（见 [`LICENSE`](LICENSE)，末尾附了中文补充说明，与 MIT 条款同等重要）：
+代码采用 **MIT**，见 [`LICENSE`](LICENSE)（保持标准原文，这样 GitHub 能正确识别为 MIT）。
+
+授权范围与免责说明单独放在 [`NOTICE.md`](NOTICE.md)，要点：
 
 - 授权**只覆盖本仓库的源代码 / 构建脚本 / 文档**；
 - **不含**任何第三方二进制（本仓库不分发它们）；
@@ -218,7 +220,7 @@ do not redistribute. Third-party binaries are not redistributed by this reposito
 
 ## 十、命名与商标说明
 
-仓库名 / 产品名刻意使用中性的 `novel-downloader`（`biquga-downloader` 作为备选仓库名），
+仓库名 / 产品名刻意使用中性的 `biquga-downloader` / `novel-downloader`，
 **不在名称里使用任何第三方商标**：本项目是第三方工具，与目标站点及
 任何同名下载器都没有关联，也不代表它们。界面里出现的站点名只用于说明"数据来自哪里"。
 
