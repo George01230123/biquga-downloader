@@ -1,0 +1,8 @@
+﻿blank_issues_enabled: false
+contact_links:
+  - name: 使用说明 / 常见问题
+    url: https://github.com/George01230123/biquga-downloader/blob/main/README.md
+    about: 怎么搜索、怎么选章节、为什么番茄要另装工具、缺章是怎么回事，README 里都有。
+  - name: 站点结构变了 / 抓不到内容
+    url: https://github.com/George01230123/biquga-downloader/blob/main/docs/站点坑.md
+    about: 两个站点的坑与自查方法（TLS、目录页、next 链接、风控）。发 issue 前先看这个。

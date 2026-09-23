@@ -1,0 +1,95 @@
+﻿name: Bug 报告
+description: 下载失败 / 缺章 / 文字有问题之类
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 先看这里，能省你一次来回
+
+        1. **缺章先看报告文件**：下载完会在书目录里生成 `书名.缺失章节.txt`，
+           写明缺哪几章、原因、以及可直接打开的地址。
+           如果原因写的是"站点这一章本身就是空的（正在手打中）"，**这不是本工具的 bug**，
+           换任何源都不会有内容。
+        2. **先跑一次离线单测**（不联网，10 秒）：
+           ```
+           dist\_offlinetests.exe
+           ```
+           结尾应显示 `通过 161/161`。不是的话请把输出贴上来。
+        3. **番茄小说网页版正文有风控和形近字替换**，抓不干净是站点行为，不是 bug
+           （详见 README 第三节）。
+        4. 站点结构随时会变，目录/正文字段失效属于常态 —— 这类 issue 请务必贴**目录页 URL**。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: "右键 `小说下载器.exe` → 属性 → 详细信息 → 文件版本。或者看窗口标题栏。"
+      placeholder: "1.0.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: site
+    attributes:
+      label: 站点
+      options:
+        - 笔趣阁（移动版·快）
+        - 笔趣阁（PC版·慢）
+        - 番茄小说
+        - 其它 / 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: book
+    attributes:
+      label: 书名与作者
+      placeholder: "牧神记 / 宅猪"
+    validations:
+      required: true
+
+  - type: input
+    id: dirurl
+    attributes:
+      label: 目录页 URL（帖子里复制的那个地址）
+      description: 例如 `https://m.biquga.com/69_69707/` 或 `https://fanqienovel.com/page/7406592861791063064`。
+      placeholder: "https://m.biquga.com/69_69707/"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 你做了什么、期望什么、实际发生了什么。有截图更好。
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 日志（界面下方那个框里的最后 50 行左右）
+      description: 直接粘贴即可。**请先把书名以外的个人信息检查一遍再贴。**
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 系统
+      placeholder: "Windows 11 23H2 / Windows 10 22H2"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已经跑过 `dist\_offlinetests.exe`，结果是 161/161 通过
+          required: false
+        - label: 我看过缺失章节报告文件（如果生成了的话）
+          required: false
