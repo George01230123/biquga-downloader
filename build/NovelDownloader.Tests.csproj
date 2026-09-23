@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       离线单测的控制台工程（CI 靠它编译 + 运行）。
+       对应 build.bat 里的 [4/6] 步骤，编译产物同名 dist\_offlinetests.exe。
+       这个测试不联网、不写 dist\cache、不写 dist\下载，可以在任何 runner 上跑。
+       ============================================================ -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>_offlinetests</AssemblyName>
+    <RootNamespace>TomatoBiquga</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>..\dist\</OutputPath>
+    <StartupObject>TomatoBiquga.OfflineTests</StartupObject>
+    <CodePage>65001</CodePage>
+    <NoWarn>1591;0618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\AssemblyInfo.cs" />
+    <Compile Include="..\src\Common\*.cs" />
+    <Compile Include="..\src\Sites\*.cs" />
+    <Compile Include="..\tests\OfflineTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

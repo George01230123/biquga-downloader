@@ -1,0 +1,37 @@
+# 统一换行符，避免 Windows/Mac 协作时整文件 diff
+* text=auto eol=lf
+
+# C# 源码用 LF
+*.cs    text eol=lf
+
+# .bat 必须 CRLF（LF-only 的 .bat 在旧 cmd 上会出怪问题）
+# 并且 .bat 必须保持纯 ASCII —— 中文请写进带 BOM 的 .ps1
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# PowerShell 用 CRLF（Windows 自带 PowerShell 5.1 读 LF 的 .ps1 没问题，
+# 但 CRLF 更符合 Windows 习惯，也不会和记事本打架）
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Markdown 一律 LF 且**不做任何转换**：-text 让 git 别碰它，
+# 顺带避免 BOM 被写入（Markdown 带 BOM 会让 GitHub 的标题掉成文件名）
+*.md    -text
+LICENSE -text
+
+# TXT 输出是程序运行时生成的（UTF-8 带 BOM），仓库里不带它
+*.json  text eol=lf
+*.txt   text eol=lf
+
+# 二进制：不做任何换行/编码转换
+*.exe   binary
+*.dll   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.zip   binary
+
+# GitHub 语言统计：把文档从 C# 占比里排除
+docs/*  linguist-documentation

@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       这个 csproj 存在的唯一目的：让 GitHub Actions（以及任何装了
+       .NET SDK 的机器）能用 `dotnet build` 编出同一个 exe。
+
+       本机零依赖编译走 build.bat（调用 Windows 自带的 csc.exe），
+       那条路径不需要 SDK、不需要联网，是这个项目的卖点，永远保留。
+
+       为什么是 net48：Windows 10 1903+ / 11 自带 .NET Framework 4.8，
+       用户开箱即用，不需要装任何运行时。
+       Microsoft.NETFramework.ReferenceAssemblies 提供 net48 的参考程序集，
+       这样在 Linux/Windows 的任意 runner 上都能编译。
+       ============================================================ -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <!-- 与 csc.exe（.NET Framework 4.x 编译器）保持一致，别用 C# 8+ 语法 -->
+    <LangVersion>7.3</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>NovelDownloader</AssemblyName>
+    <RootNamespace>TomatoBiquga</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>..\dist\</OutputPath>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- 中文源码统一按 UTF-8 读，避免 runner 区域设置不同导致乱码 -->
+    <CodePage>65001</CodePage>
+    <NoWarn>1591;0618</NoWarn>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- System.Web.Extensions：解析番茄目录接口的 JSON -->
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\AssemblyInfo.cs" />
+    <Compile Include="..\src\Program.cs" />
+    <Compile Include="..\src\MainForm.cs" />
+    <Compile Include="..\src\Common\*.cs" />
+    <Compile Include="..\src\Sites\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,97 @@
+﻿name: ci
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------
+  #  编译 + 离线自测。不联网跑站点，所以 fork 上的 PR 也能安全通过。
+  # ------------------------------------------------------------
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build GUI (net48)
+        run: dotnet build build/NovelDownloader.csproj -c Release
+
+      - name: Build offline unit tests
+        run: dotnet build build/NovelDownloader.Tests.csproj -c Release
+
+      - name: Run offline unit tests (no network)
+        shell: pwsh
+        run: |
+          ./dist/_offlinetests.exe --verbose
+          if ($LASTEXITCODE -ne 0) { throw "offline unit tests failed with exit code $LASTEXITCODE" }
+
+      - name: Check exe was produced
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ./dist/NovelDownloader.exe)) { throw "dist/NovelDownloader.exe missing" }
+          Get-Item ./dist/NovelDownloader.exe | Select-Object Name, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovelDownloader
+          path: dist/NovelDownloader.exe
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  #  打 tag（v1.0.0 之类）时自动发 Release。
+  #  包里只放 exe + 说明，绝不放第三方工具、缓存和下载到的正文。
+  # ------------------------------------------------------------
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        run: dotnet build build/NovelDownloader.csproj -c Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          # dotnet 编出来的是 ASCII 名，打包时改成中文名 —— start.bat / start.ps1 找的就是它
+          Move-Item dist/NovelDownloader.exe 'pkg/小说下载器.exe' -Force
+          Copy-Item README.md pkg/
+          Copy-Item start.bat, start.ps1 pkg/
+          if (Test-Path LICENSE) { Copy-Item LICENSE pkg/ }
+          Get-ChildItem pkg | Select-Object Name, Length
+          Compress-Archive -Path pkg/* -DestinationPath "novel-downloader-${{ github.ref_name }}-win64.zip" -Force
+          Get-Item "novel-downloader-${{ github.ref_name }}-win64.zip" | Select-Object Name, Length
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: novel-downloader-${{ github.ref_name }}-win64.zip
+          generate_release_notes: true
+          body: |
+            ## 下载即用
+
+            解压后双击 `start.bat`（或直接双击 exe），无需安装、无需任何运行时
+            （Windows 10 1903+ / 11 自带 .NET Framework 4.8）。
+
+            ## 只做「解析公开网页 + 导出本地 TXT」
+
+            不破解 DRM、不绕过登录或付费墙、不内置任何正文数据源。
+            下载内容版权归原作者与发布站点，**仅供个人离线阅读，请勿传播**。
