@@ -30,6 +30,10 @@
     <Compile Include="..\src\AssemblyInfo.cs" />
     <Compile Include="..\src\Common\*.cs" />
     <Compile Include="..\src\Sites\*.cs" />
+    <!-- 布局自检会真的 new 一个 MainForm（屏幕外）来量控件坐标，所以要链接界面源码。
+         注意：本地 build.bat 和这个 csproj 必须同步加文件 —— v1.0.2 的 CI 就是因为
+         只在 build.bat 里加了 MainForm.cs、忘了这里而失败的。 -->
+    <Compile Include="..\src\MainForm.cs" />
     <Compile Include="..\tests\OfflineTests.cs" />
   </ItemGroup>
 

@@ -709,6 +709,15 @@ namespace TomatoBiquga
                 probe.Hide();
             }
 
+            // 真实开窗需要桌面会话（窗口句柄 / 窗口站）。没有桌面的 CI runner 上
+            // Show() 会抛异常 —— 那不是布局问题，跳过并说明即可，别让整个 CI 变红。
+            try { using (var canary = new Form()) { canary.Show(); canary.Hide(); } }
+            catch (Exception ex)
+            {
+                Console.WriteLine("  [跳过] 当前环境无法创建窗口，跳过开窗布局断言：" + ex.GetType().Name);
+                return;
+            }
+
             var sizes = new[]
             {
                 new Size(820, 600),    // 最小尺寸
