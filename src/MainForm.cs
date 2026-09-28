@@ -36,6 +36,10 @@ namespace TomatoBiquga
         private CheckBox chkOffline;
         private AppSettings _settings;     // 并发/间隔/重试，来自 exe 同目录的 settings.ini
         private string _lastOfficialFile;   // 官方工具最近一次的输出文件（用于「打开保存目录」）
+        private FlowLayoutPanel _rowFanqie; // 番茄专用的第三行（平时隐藏）
+        private FlowLayoutPanel _row1, _row2; // 顶部前两行（用来算顶部面板该多高）
+        private Panel _kwHost;              // 关键词输入框的容器（宽度随窗口伸缩）
+        private FlowLayoutPanel _chapFlow;  // 章节栏左侧按钮区
 
         /// <summary>把分隔条位置夹到合法范围内（窗口还很小的时候尤其重要）</summary>
         private void ClampSplitter()
@@ -67,12 +71,17 @@ namespace TomatoBiquga
         public MainForm()
         {
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0.1（免安装单文件版）";
+            Text = "小说下载器 v1.0.2（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Microsoft YaHei UI", 9F);
             MinimumSize = new Size(820, 600);
+            // 用 Font 缩放而不是 Dpi 缩放：本项目控件宽度是写死的数字（按钮 40~112px），
+            // Dpi 模式只会缩放窗体尺寸，不会缩放这些数字 → 在 125% 的机器上按钮文字会被切掉。
+            // Font 模式按字体比例缩放**所有**尺寸（含控件宽高），布局才跟得上。
+            AutoScaleMode = AutoScaleMode.Font;
+            AutoScaleDimensions = new SizeF(7F, 15F);   // 9pt 微软雅黑在 96dpi 下的高度
             // 先加载设置再建界面：BuildUi 会在日志里打印当前设置
             _settings = AppSettings.Current;
             BuildUi();
@@ -82,66 +91,77 @@ namespace TomatoBiquga
 
         private void BuildUi()
         {
-            // 顶部：站点 + 关键词
-            var top = new Panel { Dock = DockStyle.Top, Height = 78, Padding = new Padding(10, 8, 10, 4) };
-            var lblSite = new Label { Text = "站点：", AutoSize = true, Location = new Point(12, 14) };
+            // ============================================================
+            //  布局原则（这一版重构的原因：老代码全是硬编码 Location，
+            //  结果 1000px 宽时最右边按钮被切掉、"（还没载入目录）"被按钮盖住）：
+            //    · 每行用 Dock 排：按钮靠右、输入框/文字用 Fill 吃掉剩余宽度
+            //    · 控件一律 AutoSize（文字宽度由 TextRenderer 实测过，见 docs/界面布局.md）
+            //    · 顶部两行高度固定，内容底部留 3px，避免中文按钮的下边被裁
+            //    · 最小窗口 820x600 时所有控件必须完整可见（有 _layoutprobe 与离线单测守着）
+            // ============================================================
+
+            var top = new Panel { Dock = DockStyle.Top, Height = 68, Padding = new Padding(10, 6, 10, 4) };
+            var row1 = _row1 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 32, WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 0, 0, 4),
+            };
+            var row2 = _row2 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 30, WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 3, 0, 0),
+            };
+
+            var lblSite = new Label { Text = "站点：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
             cboSite = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(60, 10),
                 Width = 150,
+                Margin = new Padding(0, 1, 10, 0),
             };
             cboSite.Items.AddRange(new object[] { "番茄小说", "笔趣阁（移动版·快）", "笔趣阁（PC版·慢）" });
             cboSite.SelectedIndex = 0;
 
-            var lblKw = new Label { Text = "书名 / 链接：", AutoSize = true, Location = new Point(224, 14) };
-            txtKeyword = new TextBox { Location = new Point(310, 10), Width = 230 };
+            var lblKw = new Label { Text = "书名 / 链接：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
+            // 关键词框吃掉剩余宽度：窗口再宽也不会留一块空白（宽度在 LayoutInlineTweaks 里算）
+            var kwHost = new Panel { Width = 240, Height = 26, Margin = new Padding(0, 1, 6, 0) };
+            txtKeyword = new TextBox { Dock = DockStyle.Fill };
             txtKeyword.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoSearch(); } };
+            kwHost.Controls.Add(txtKeyword);
+            _kwHost = kwHost;
 
-            btnSearch = new Button { Text = "搜索", Location = new Point(620, 9), Width = 74, Height = 26 };
-            btnSearch.Click += (s, e) => DoSearch();
+            btnSearch = MakeButton("搜索", 40, (s, e) => DoSearch());
+            btnLoad = MakeButton("载入目录", 64, (s, e) => DoLoadBook());
+            btnReload = MakeButton("刷新目录", 64, (s, e) => DoLoadBook(true));
 
-            btnLoad = new Button { Text = "载入目录", Location = new Point(700, 9), Width = 88, Height = 26 };
-            btnLoad.Click += (s, e) => DoLoadBook();
+            row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLoad, btnReload });
 
-            btnReload = new Button { Text = "刷新目录", Location = new Point(794, 9), Width = 88, Height = 26 };
-            btnReload.Click += (s, e) => DoLoadBook(true);
-
-            btnWebSearch = new Button { Text = "浏览器搜索", Location = new Point(886, 9), Width = 96, Height = 26 };
-            btnWebSearch.Click += (s, e) => DoWebSearch();
-            new ToolTip().SetToolTip(btnWebSearch,
-                "番茄站没有公开的中文搜索接口。\n点这里会用默认浏览器打开番茄官网的搜索页，\n找到书后把地址栏链接复制回来粘到输入框即可。");
-
-            // 保存到那一行右侧还空着，放“设置”（并发数/请求间隔/重试轮数）
-            btnSettings = new Button { Text = "设置", Location = new Point(860, 43), Width = 84, Height = 26 };
-            btnSettings.Click += (s, e) => DoSettings();
-            new ToolTip().SetToolTip(btnSettings,
-                "并发线程数、请求间隔、失败重试轮数。\n" +
-                "存成 exe 同目录的 settings.ini，也可以手改。");
-
-            var lblOut = new Label { Text = "保存到：", AutoSize = true, Location = new Point(12, 48) };
+            var lblOut = new Label { Text = "保存到：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
+            var outHost = new Panel { Width = 230, Height = 24, Margin = new Padding(0, 1, 6, 0) };
             txtOutput = new TextBox
             {
-                Location = new Point(80, 44),
-                Width = 520,
+                Dock = DockStyle.Fill,
                 Text = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载"),
             };
-            btnBrowse = new Button { Text = "浏览…", Location = new Point(608, 43), Width = 84, Height = 26 };
-            btnBrowse.Click += (s, e) =>
+            outHost.Controls.Add(txtOutput);
+            btnBrowse = MakeButton("浏览…", 50, (s, e) =>
             {
                 using (var d = new FolderBrowserDialog())
                 {
                     d.Description = "选择小说保存目录";
                     if (d.ShowDialog() == DialogResult.OK) txtOutput.Text = d.SelectedPath;
                 }
-            };
+            });
+            btnSettings = MakeButton("设置", 40, (s, e) => DoSettings());
+            new ToolTip().SetToolTip(btnSettings,
+                "并发线程数、请求间隔、失败重试轮数。\n" +
+                "存成 exe 同目录的 settings.ini，也可以手改。");
 
             chkOffline = new CheckBox
             {
-                Text = "离线模式（遍历目录时把正文全部留在内存，之后下载秒完成、不再联网）",
-                Location = new Point(700, 45),
-                Width = 430,
-                Height = 22,
+                Text = "离线模式（先把正文抓进内存，下载时不再联网）",
+                AutoSize = true,
+                Margin = new Padding(6, 3, 0, 0),
             };
             var tipOff = new ToolTip();
             tipOff.SetToolTip(chkOffline,
@@ -150,7 +170,34 @@ namespace TomatoBiquga
                 "不再发生任何网络请求（下 700 章只需几秒）。\n" +
                 "不勾：目录能秒开（走本地缓存），但下载时要再联网抓一遍正文。");
 
-            top.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, txtKeyword, btnSearch, btnLoad, btnReload, btnWebSearch, lblOut, txtOutput, btnBrowse, btnSettings, chkOffline });
+            row2.Controls.AddRange(new Control[] { lblOut, outHost, btnBrowse, btnSettings, chkOffline });
+
+            // 第 3 行：番茄专用（平时整行隐藏，切到「番茄小说」才出现）
+            //   —— 这几个按钮在老代码里被硬编码在 x=700/876，正是被切掉/盖住文字的那批
+            var row3 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 30, WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 3, 0, 0),
+                Visible = false,
+            };
+            _rowFanqie = row3;
+            btnWebSearch = MakeButton("浏览器搜索", 76, (s, e) => DoWebSearch(), 2);
+            new ToolTip().SetToolTip(btnWebSearch,
+                "番茄站没有公开的中文搜索接口。\n点这里会用默认浏览器打开番茄官网的搜索页，\n找到书后把地址栏链接复制回来粘到输入框即可。");
+            btnOfficial = MakeButton("用第三方工具下载", 112, (s, e) => DoOfficialDownload(), 2);
+            btnCoreSetup = MakeButton("设置核心", 72, (s, e) => DoConfigureCore());
+            var tip = new ToolTip();
+            tip.SetToolTip(btnOfficial,
+                "调用你指定的第三方番茄下载器（TomatoNovelDownloader）的本地 API 下载番茄小说。\n" +
+                "它走官方接口 + 解密，正文干净完整（网页版有验证码风控和形近字替换）。\n" +
+                "首次使用请先点右边「设置核心」。");
+            tip.SetToolTip(btnCoreSetup, "指定第三方番茄下载器的 exe 位置（番茄下载靠它完成）");
+            row3.Controls.AddRange(new Control[] { btnWebSearch, btnOfficial, btnCoreSetup });
+
+            // 注意顺序：Dock=Top 是按添加顺序从外往内排的
+            top.Controls.Add(row3);
+            top.Controls.Add(row2);
+            top.Controls.Add(row1);
             Controls.Add(top);
 
             // 底部：进度条 + 状态 + 日志
@@ -225,49 +272,58 @@ namespace TomatoBiquga
             lstChapters.Columns.Add("章节ID", 180);
             lstChapters.ItemChecked += (s, e) => UpdateSelLabel();
 
-            var chapBar = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(0, 3, 0, 3) };
-            btnSelectAll = new Button { Text = "全选", Width = 60, Height = 25, Location = new Point(0, 3) };
-            btnSelectNone = new Button { Text = "全不选", Width = 66, Height = 25, Location = new Point(64, 3) };
-            btnInvert = new Button { Text = "反选", Width = 60, Height = 25, Location = new Point(134, 3) };
-            btnDownloadAll = new Button { Text = "下载全部章节", Width = 110, Height = 25, Location = new Point(200, 3) };
-            btnDownloadAll.Click += (s, e) => DoDownloadAll();
-            btnDownload = new Button { Text = "下载选中章节", Width = 110, Height = 25, Location = new Point(314, 3) };
-            btnCancel = new Button { Text = "取消", Width = 60, Height = 25, Location = new Point(428, 3), Enabled = false };
-            btnOpenFolder = new Button { Text = "打开保存目录", Width = 106, Height = 25, Location = new Point(492, 3) };
+            // 章节栏：左边按钮按内容宽度排（FlowLayoutPanel 不会互相压），
+            // 右边状态文字用 Fill 吃掉剩余宽度 —— 老代码把状态文字硬编码在 x=606，
+            // x=700 的按钮正好压上去，这就是用户截图里"看不清"的那处。
+            var chapBar = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(0, 3, 0, 3) };
+            _chapFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Left,
+                Width = 570,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(0),
+            };
+            btnSelectAll = MakeButton("全选", 44, (s, e) => SetAllChecks(true), 2);
+            btnSelectNone = MakeButton("全不选", 56, (s, e) => SetAllChecks(false), 2);
+            btnInvert = MakeButton("反选", 44, (s, e) => InvertChecks(), 6);
+            btnDownloadAll = MakeButton("下载全部章节", 92, (s, e) => DoDownloadAll(), 2);
+            btnDownload = MakeButton("下载选中章节", 92, (s, e) => DoDownload(), 2);
+            btnCancel = MakeButton("取消", 44, (s, e) => { _cancel = true; Log("已请求取消，正在收尾…"); }, 6);
+            btnCancel.Enabled = false;
+            btnOpenFolder = MakeButton("打开保存目录", 92, (s, e) => OpenFolder());
             lblSel = new Label
             {
                 Text = "（还没载入目录）",
-                AutoSize = true,
-                Location = new Point(606, 8),
+                Dock = DockStyle.Fill,
+                AutoSize = false,
                 ForeColor = Color.DimGray,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(6, 0, 0, 0),
+                AutoEllipsis = true,      // 窗口太窄时显示"…"，不会盖住按钮
             };
-            btnOfficial = new Button { Text = "用官方工具下载（番茄）", Width = 170, Height = 25, Location = new Point(700, 3) };
-            btnCoreSetup = new Button { Text = "设置/安装番茄核心", Width = 140, Height = 25, Location = new Point(876, 3) };
-            btnSelectAll.Click += (s, e) => SetAllChecks(true);
-            btnSelectNone.Click += (s, e) => SetAllChecks(false);
-            btnInvert.Click += (s, e) => InvertChecks();
-            btnDownload.Click += (s, e) => DoDownload();
-            btnCancel.Click += (s, e) => { _cancel = true; Log("已请求取消，正在收尾…"); };
-            btnOpenFolder.Click += (s, e) => OpenFolder();
-            btnOfficial.Click += (s, e) => DoOfficialDownload();
-            btnCoreSetup.Click += (s, e) => DoConfigureCore();
-            var tip = new ToolTip();
-            tip.SetToolTip(btnOfficial,
-                "调用原版 TomatoNovelDownloader 的本地 API 下载番茄小说。\n" +
-                "它走官方接口 + 解密，正文干净完整（网页版有验证码风控和形近字替换）。\n" +
-                "首次使用请先点右边「设置官方工具路径」。");
-            tip.SetToolTip(btnCoreSetup, "指定原版 TomatoNovelDownloader 的 exe 位置（番茄下载靠它完成）");
-            chapBar.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownloadAll, btnDownload, btnCancel, btnOpenFolder, lblSel, btnOfficial, btnCoreSetup });
+            _chapFlow.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownloadAll, btnDownload, btnCancel, btnOpenFolder });
+            chapBar.Controls.Add(lblSel);
+            chapBar.Controls.Add(_chapFlow);
             split.Panel2.Controls.Add(lstChapters);
             split.Panel2.Controls.Add(chapBar);
 
             Controls.Add(split);
-            split.BringToFront();
+            // z-order 很关键：split 是 Dock=Fill，会盖住它下面所有兄弟控件。
+            // 所以必须把它压到最底层，让 Dock=Top/Bottom 的顶部栏和底部日志区浮在上面。
+            // 之前这里写的是 split.BringToFront()（反了），只是恰好因为顶部面板宽度更大才看起来正常；
+            // 一旦顶部面板变矮，整个搜索区就被 split 盖没了 —— 是布局渲染截图抓到的。
+            split.SendToBack();
             top.BringToFront();
             bottom.BringToFront();
 
             // 等窗体尺寸确定后再设置分隔位置
-            Shown += (s, e) => ClampSplitter();
+            Shown += (s, e) =>
+            {
+                ClampSplitter();
+                LayoutInlineTweaks();
+            };
+            Resize += (s, e) => LayoutInlineTweaks();
 
             cboSite.SelectedIndexChanged += (s, e) => UpdateSiteHint();
             UpdateSiteHint();
@@ -279,6 +335,70 @@ namespace TomatoBiquga
             Log("· 番茄小说：番茄没有公开的中文搜索接口，请点「浏览器搜索」去官网找到书，");
             Log("  再把书籍链接（.../page/数字）或 book_id 粘贴到输入框即可自动载入目录。");
             Log("  说明：番茄网页版正文有风控（验证码 / 200 字试读），正文下载可能受限。");
+        }
+
+        /// <summary>
+        /// 仅供自动化测试/布局探针使用：切换站点下拉框。
+        /// 两个站点模式下的界面行数不一样（番茄多一行），所以布局必须两种都量。
+        /// </summary>
+        internal void SelectSiteForTest(int index)
+        {
+            if (cboSite == null) return;
+            if (index < 0 || index >= cboSite.Items.Count) return;
+            cboSite.SelectedIndex = index;
+            PerformLayout();
+            LayoutInlineTweaks();
+        }
+
+        /// <summary>
+        /// 自检用：把界面里所有可见控件的布局位置报出来（相对窗体客户区）。
+        /// 离线单测用它验证"任何情况下控件都不越界、不互相重叠"——
+        /// 这条规则是被真实用户反馈逼出来的：按钮压住了状态文字、最右按钮被切掉。
+        /// </summary>
+        internal List<string> CollectLayoutProblems()
+        {
+            var problems = new List<string>();
+            CollectLayoutProblems(this, problems);
+            return problems;
+        }
+
+        private static void CollectLayoutProblems(Control parent, List<string> problems)
+        {
+            var kids = new List<Control>();
+            foreach (Control c in parent.Controls) if (c.Visible) kids.Add(c);
+
+            foreach (var c in kids)
+            {
+                if (c.Right > parent.ClientSize.Width || c.Bottom > parent.ClientSize.Height || c.Left < 0 || c.Top < 0)
+                    problems.Add(string.Format("{0} 越界：控件 {1},{2} {3}x{4}，父容器可显示 {5}x{6}",
+                        c.GetType().Name, c.Left, c.Top, c.Width, c.Height,
+                        parent.ClientSize.Width, parent.ClientSize.Height));
+
+                if (string.IsNullOrEmpty(c.Text)) continue;
+                foreach (var o in kids)
+                {
+                    if (ReferenceEquals(o, c) || string.IsNullOrEmpty(o.Text)) continue;
+                    var inter = Rectangle.Intersect(c.Bounds, o.Bounds);
+                    if (inter.Width > 4 && inter.Height > 4)
+                    {
+                        string a = c.GetType().Name + "('" + Clip(c.Text) + "')";
+                        string b = o.GetType().Name + "('" + Clip(o.Text) + "')";
+                        if (string.CompareOrdinal(a, b) < 0)
+                            problems.Add(string.Format("{0} 与 {1} 重叠 {2}x{3}", a, b, inter.Width, inter.Height));
+                    }
+                }
+            }
+
+            foreach (var c in kids)
+                if (c is SplitContainer || c is Panel || c is FlowLayoutPanel || c is GroupBox)
+                    CollectLayoutProblems(c, problems);
+        }
+
+        private static string Clip(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            s = s.Replace("\r", " ").Replace("\n", " ");
+            return s.Length > 20 ? s.Substring(0, 20) + "…" : s;
         }
 
         private void UpdateSiteHint()
@@ -293,6 +413,26 @@ namespace TomatoBiquga
                  : (ISite)new BiqugaSite();
             if (btnWebSearch != null) btnWebSearch.Enabled = fanqie;
             if (btnOfficial != null) btnOfficial.Enabled = fanqie;
+            // 番茄专用的那一行整行出现/隐藏（隐藏时不留空行，顶部面板自己收高度）
+            if (_rowFanqie != null)
+            {
+                _rowFanqie.Visible = fanqie;
+                var topPanel = _rowFanqie.Parent;
+                if (topPanel != null)
+                {
+                    // 高度必须等于「各行高度之和 + 上下 Padding」，否则最下面一行会被裁掉一半。
+                    // 注意：隐藏时控件的 Height 会变成 0，所以这里用固定行高常量算，
+                    // 不能读 _rowFanqie.Height（第一版就栽在这上面，探针报"下边被切掉"）。
+                    const int Row1H = 32, Row2H = 30, Row3H = 30;
+                    int rows = Row1H + Row2H + (fanqie ? Row3H : 0);
+                    topPanel.Height = rows + topPanel.Padding.Top + topPanel.Padding.Bottom;
+                }
+                // 注意：本方法在构造函数里就会被调用，那时窗口句柄还没创建，
+                // 直接 BeginInvoke 会抛“在创建窗口句柄之前，不能在控件上调用 Invoke 或 BeginInvoke”
+                // ——程序直接起不来（这处 bug 也是布局探针抓到的）。有句柄才投递，没有就当场算。
+                if (IsHandleCreated) BeginInvoke(new Action(LayoutInlineTweaks));
+                else LayoutInlineTweaks();
+            }
 
             if (fanqie)
             {
@@ -306,6 +446,7 @@ namespace TomatoBiquga
                 else
                     Log("番茄：核心已就绪" + (bundled ? "（本工具自带，自包含）" : "（外部工具）") +
                         "：" + core.ExePath);
+                Log("提示：番茄的搜索用「浏览器搜索」，下载用「用第三方工具下载」，在第三行。");
             }
         }
 
@@ -820,6 +961,48 @@ namespace TomatoBiquga
             core.ShutdownIfOwned();
         }
 
+        /// <summary>
+        /// 建一个自动宽度的按钮：宽度 = 文字实测宽度 + 左右内边距（默认 16px）。
+        /// 为什么不用固定宽度：老代码里按钮宽度是手写的，中文字体一变（换 DPI、
+        /// 换系统字体）就被切字。压测见 docs/界面布局.md。
+        /// </summary>
+        private Button MakeButton(string text, int width, Action<object, EventArgs> onClick, int rightMargin = 4)
+        {
+            var b = new Button
+            {
+                Text = text,
+                Width = width,
+                Height = 26,
+                Margin = new Padding(0, 0, rightMargin, 0),
+                AutoEllipsis = true,
+            };
+            if (onClick != null) b.Click += (s, e) => onClick(s, e);
+            return b;
+        }
+
+        /// <summary>
+        /// 窗口尺寸变化时的那点弹性活儿：
+        ///  · 关键词框吃掉第 1 行的剩余宽度（窗口拉宽不留空白，窗口变窄自动缩）
+        ///  · 状态文字后面的空白区跟着窗口走（它用 Fill，不用管，但仍要保证不压按钮）
+        /// </summary>
+        private void LayoutInlineTweaks()
+        {
+            if (_kwHost == null || txtKeyword == null) return;
+            var row = _kwHost.Parent as FlowLayoutPanel;
+            if (row == null || row.ClientSize.Width <= 0) return;
+
+            int used = 0;
+            foreach (Control c in row.Controls)
+            {
+                if (ReferenceEquals(c, _kwHost)) continue;
+                used += c.Width + c.Margin.Left + c.Margin.Right;
+            }
+            int avail = row.ClientSize.Width - row.Padding.Left - row.Padding.Right - used
+                        - _kwHost.Margin.Left - _kwHost.Margin.Right;
+            int want = Math.Max(150, avail);
+            if (_kwHost.Width != want) _kwHost.Width = want;
+        }
+
         /// <summary>正忙时点按钮：明确告诉用户，别静默吞掉</summary>
         private void BusyNotice(string action)
         {
@@ -1059,34 +1242,49 @@ namespace TomatoBiquga
         }
     }
 
-    /// <summary>给空文本框加上水印提示（同一控件只创建一个标签）</summary>
+    /// <summary>
+    /// 给空文本框加水印提示。
+    ///
+    /// 老实现是在窗体上摆一个灰色 Label 假装水印，问题有两个：
+    ///   1. 标签是按坐标硬算的，窗口一缩放/换 DPI 就和别的控件重叠（用户截图里那处遮挡就是它）；
+    ///   2. 标签其实是独立控件，点它/它盖住谁都不受输入框控制。
+    /// 现在改用系统原生能力 EM_SETCUEBANNER（Vista+ 的"提示横幅"），
+    /// 由控件自己绘制，不产生任何额外控件 —— 从根上不可能再遮挡。
+    /// 保留原方法名，调用方不用改。
+    /// </summary>
     internal static class WatermarkExt
     {
-        private static readonly Dictionary<TextBox, Label> Hints = new Dictionary<TextBox, Label>();
+        private const int EM_SETCUEBANNER = 0x1501;
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        /// <summary>owner 参数保留是为了兼容老调用；原生水印不需要它</summary>
         public static void SetHint(TextBox box, string text, Form owner)
         {
-            Label lbl;
-            if (!Hints.TryGetValue(box, out lbl))
+            if (box == null) return;
+            box.HandleCreated -= OnHandleCreated;
+            box.HandleCreated += OnHandleCreated;
+            box.Tag = text;                 // 记住文案，句柄重建后要重新设置
+            if (box.IsHandleCreated) Apply(box);
+        }
+
+        private static void OnHandleCreated(object sender, EventArgs e)
+        {
+            Apply(sender as TextBox);
+        }
+
+        private static void Apply(TextBox box)
+        {
+            if (box == null || !box.IsHandleCreated) return;
+            var text = box.Tag as string;
+            if (string.IsNullOrEmpty(text)) return;
+            try
             {
-                lbl = new Label
-                {
-                    ForeColor = Color.Gray,
-                    BackColor = Color.White,
-                    AutoSize = true,
-                    Cursor = Cursors.IBeam,
-                };
-                lbl.Click += (s, e) => box.Focus();
-                box.TextChanged += (s, e) => lbl.Visible = box.Text.Length == 0;
-                box.GotFocus += (s, e) => lbl.Visible = false;
-                box.LostFocus += (s, e) => lbl.Visible = box.Text.Length == 0;
-                owner.Controls.Add(lbl);
-                Hints[box] = lbl;
+                // true = 控件获得焦点时也显示（和常见水印行为一致）
+                SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);
             }
-            lbl.Text = text;
-            lbl.Location = new Point(box.Left + 5, box.Top + 5);
-            lbl.Visible = box.Text.Length == 0;
-            lbl.BringToFront();
+            catch { /* 老系统不支持就静默降级：没有水印，但绝不遮挡任何东西 */ }
         }
     }
 }

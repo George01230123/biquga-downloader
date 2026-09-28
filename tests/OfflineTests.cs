@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Windows.Forms;
 using TomatoBiquga;
 
 namespace TomatoBiquga
@@ -134,6 +136,7 @@ namespace TomatoBiquga
                 TestBuildHeader();
                 TestFixHeaderNow(work);
                 TestMissingReport(work);
+                TestLayout();
                 TestFontMap();
             }
             catch (Exception ex)
@@ -673,6 +676,96 @@ namespace TomatoBiquga
             Contains("缺失报告：番茄地址用 reader 链接",
                 File.ReadAllText(fq.ReportFile, Encoding.UTF8),
                 "https://fanqienovel.com/reader/7406592932351836696");
+        }
+
+        // ============================================================
+        //  10) 界面布局：任何窗口尺寸/站点模式下，控件都不能越界或互相重叠
+        //      —— 这条是真实用户反馈逼出来的：按钮压住"（还没载入目录）"文字，
+        //         最右边的「设置/安装番茄核心」被切掉一半。
+        // ============================================================
+
+        private static void TestLayout()
+        {
+            // 先自证"检查器真的能发现问题"：故意摆两个重叠控件 + 一个越界控件，必须都能报出来。
+            // （否则"布局无越界"这句可能只是因为检查器永远返回空 —— 等于没测。）
+            using (var probe = new Form())
+            {
+                probe.ClientSize = new Size(300, 120);
+                probe.StartPosition = FormStartPosition.Manual;
+                probe.Location = new Point(-4000, -4000);
+                probe.ShowInTaskbar = false;
+                var a = new Label { Text = "甲甲甲", Bounds = new Rectangle(10, 10, 120, 20) };
+                var b = new Label { Text = "乙乙乙", Bounds = new Rectangle(60, 15, 120, 20) };
+                var c = new Label { Text = "越界", Bounds = new Rectangle(280, 10, 100, 20) };
+                probe.Controls.AddRange(new Control[] { a, b, c });
+                // 必须 Show 一下：控件没显示时 Visible 全是 false，检查器会跳过它们（那样这条自证就是空转，
+                // 第一版正是这么写的，跑出来两条 FAIL —— 自证断言的价值就在这儿）
+                probe.Show();
+                Application.DoEvents();
+                probe.PerformLayout();
+                var seeded = ProbeProblems(probe);
+                Check("布局检查器能发现重叠", seeded.Exists(x => x.Contains("重叠")));
+                Check("布局检查器能发现越界", seeded.Exists(x => x.Contains("越界")));
+                probe.Hide();
+            }
+
+            var sizes = new[]
+            {
+                new Size(820, 600),    // 最小尺寸
+                new Size(1000, 720),   // 默认尺寸
+                new Size(1280, 800),   // 拉大
+            };
+            var siteNames = new[] { "番茄小说", "笔趣阁（移动版）", "笔趣阁（PC版）" };
+
+            foreach (var size in sizes)
+            {
+                for (int si = 0; si < siteNames.Length; si++)
+                {
+                    string where = string.Format("{0}x{1}/{2}", size.Width, size.Height, siteNames[si]);
+                    try
+                    {
+                        using (var f = new MainForm())
+                        {
+                            f.StartPosition = FormStartPosition.Manual;
+                            f.Location = new Point(-4000, -4000);
+                            f.ShowInTaskbar = false;
+                            f.SuppressDialogs = true;
+                            f.Size = size;
+                            f.Show();
+                            Application.DoEvents();
+                            f.SelectSiteForTest(si);
+                            Application.DoEvents();
+                            f.PerformLayout();
+
+                            var problems = f.CollectLayoutProblems();
+                            Check("布局无越界/重叠（" + where + "）", problems.Count == 0);
+                            if (problems.Count > 0)
+                            {
+                                var head = new StringBuilder();
+                                for (int i = 0; i < problems.Count && i < 4; i++)
+                                    head.Append(" | ").Append(problems[i]);
+                                Failures.Add("      布局问题明细：" + head);
+                            }
+                            f.Hide();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Record("布局体检不抛异常（" + where + "）", false, ex.GetType().Name + " " + ex.Message);
+                    }
+                }
+            }
+        }
+
+        /// <summary>借 MainForm 的检查逻辑去查任意容器（只为自证检查器有效，不是产品逻辑）</summary>
+        private static List<string> ProbeProblems(Control container)
+        {
+            var list = new List<string>();
+            var m = typeof(MainForm).GetMethod("CollectLayoutProblems",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            if (m == null) { list.Add("找不到 CollectLayoutProblems（检查器被改名了？）"); return list; }
+            m.Invoke(null, new object[] { container, list });
+            return list;
         }
 
         /// <summary>在字节数组里找一段文本的字节偏移（IndexOf 给的是字符下标，中文不是 1:1）</summary>

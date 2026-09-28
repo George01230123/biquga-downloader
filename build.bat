@@ -49,10 +49,12 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 
 echo [4/6] Building offline unit tests (no network needed, used by CI)...
-rem DirCache.KeyFor calls a static BiqugaSite helper, so the site sources are linked
-rem in as well; the test itself performs no network access.
+rem DirCache.KeyFor calls a static BiqugaSite helper, so the site sources are linked in
+rem as well. MainForm is linked too: the layout self-test builds a real (offscreen) form
+rem and asserts that no control overflows its parent or overlaps another one.
+rem The test performs no network access and writes nothing to dist\cache.
 "%CSC%" %FLAGS% /target:exe /main:TomatoBiquga.OfflineTests /out:"dist\_offlinetests.exe" %REFS% ^
- src\AssemblyInfo.cs tests\OfflineTests.cs %COMMON% %SITES%
+ src\AssemblyInfo.cs src\MainForm.cs tests\OfflineTests.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
 echo [5/6] Renaming GUI output (Chinese name, done in PowerShell)...
