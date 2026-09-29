@@ -27,11 +27,25 @@ jobs:
       - name: Build offline unit tests
         run: dotnet build build/NovelDownloader.Tests.csproj -c Release
 
+      - name: Build layout probe
+        run: dotnet build build/NovelDownloader.Probe.csproj -c Release
+
       - name: Run offline unit tests (no network)
         shell: pwsh
         run: |
           ./dist/_offlinetests.exe --verbose
           if ($LASTEXITCODE -ne 0) { throw "offline unit tests failed with exit code $LASTEXITCODE" }
+
+      # 再做一次独立的界面布局体检：3 个站点模式 × 4 种窗口尺寸，
+      # 任何控件越界或互相重叠都直接失败（用户反馈的就是这类问题）。
+      - name: Check UI layout (no overflow / no overlap)
+        shell: pwsh
+        run: |
+          ./dist/_layoutprobe.exe
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content ./dist/_layout.txt -ErrorAction SilentlyContinue
+            throw "layout probe reported problems (exit $LASTEXITCODE)"
+          }
 
       - name: Check exe was produced
         shell: pwsh

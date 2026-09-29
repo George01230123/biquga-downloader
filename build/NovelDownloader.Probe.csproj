@@ -1,9 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- ============================================================
-       离线单测的控制台工程（CI 靠它编译 + 运行）。
-       对应 build.bat 里的 [4/6] 步骤，编译产物同名 dist\_offlinetests.exe。
-       这个测试不联网、不写 dist\cache、不写 dist\下载，可以在任何 runner 上跑。
+       布局探针（开发/CI 工具）：建真实窗体（屏幕外）量控件坐标，
+       报告越界与重叠，并可传 shots 参数截屏。产物 dist\_layoutprobe.exe。
+
+       它必须单独一个工程：探针有自己的 Main，混进 Tests 工程会和
+       OfflineTests 的入口冲突（一个工程只能有一个入口）。
+       build.bat 里对应同名的编译步骤，两条路径要保持同步。
+
+       注意 XML 注释里不能出现连续两个减号（写命令行参数时要避开）。
        ============================================================ -->
 
   <PropertyGroup>
@@ -11,13 +16,13 @@
     <TargetFramework>net48</TargetFramework>
     <LangVersion>7.3</LangVersion>
     <UseWindowsForms>true</UseWindowsForms>
-    <AssemblyName>_offlinetests</AssemblyName>
+    <AssemblyName>_layoutprobe</AssemblyName>
     <RootNamespace>TomatoBiquga</RootNamespace>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>..\dist\</OutputPath>
-    <StartupObject>TomatoBiquga.OfflineTests</StartupObject>
+    <StartupObject>TomatoBiquga.LayoutProbe</StartupObject>
     <CodePage>65001</CodePage>
     <NoWarn>1591;0618</NoWarn>
   </PropertyGroup>
@@ -28,15 +33,11 @@
 
   <ItemGroup>
     <Compile Include="..\src\AssemblyInfo.cs" />
+    <Compile Include="..\src\Program.cs" />
+    <Compile Include="..\src\MainForm.cs" />
     <Compile Include="..\src\Common\*.cs" />
     <Compile Include="..\src\Sites\*.cs" />
-    <!-- 布局自检会真的 new 一个 MainForm（屏幕外）来量控件坐标，所以要链接界面源码。
-         注意：本地 build.bat 和这个 csproj 必须同步加文件 —— v1.0.2 的 CI 就是因为
-         只在 build.bat 里加了 MainForm.cs、忘了这里而失败的。
-         布局探针是**独立工程** NovelDownloader.Probe.csproj（它有自己的 Main，
-         混进这个工程会和 OfflineTests 的入口冲突）。 -->
-    <Compile Include="..\src\MainForm.cs" />
-    <Compile Include="..\tests\OfflineTests.cs" />
+    <Compile Include="..\tools\LayoutProbe.cs" />
   </ItemGroup>
 
   <ItemGroup>

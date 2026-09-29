@@ -20,7 +20,7 @@
 ## 一、快速开始
 
 **下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
-（`novel-downloader-v1.0.2-win64.zip`，约 55 KB）
+（`novel-downloader-v1.0.3-win64.zip`，约 55 KB）
 
 > **打不开 github.com？**（国内网络常见，本项目开发期间实测断过两次）
 > `api.github.com` 通常还是通的，粘这段到 PowerShell 就能下（不用改任何东西）：
@@ -123,7 +123,7 @@ build.bat
 | `小说下载器.exe` | 图形界面主程序（单文件，免安装） |
 | `_selftest.exe` | 命令行自测：`_selftest.exe dl /69_69707 6`、`biquga`、`fanqie`、`write` |
 | `_edgetest.exe` | 边界测试（含离屏真下载：把窗口移到屏幕外，跑一遍和界面完全相同的下载路径） |
-| `_offlinetests.exe` | **172 项离线单测，不联网**（CI 跑的就是它） |
+| `_offlinetests.exe` | **184 项离线单测，不联网**（CI 跑的就是它） |
 
 `build.bat` 第一步会跑 `build\fix-encoding.ps1`：自动把源码补成 UTF-8 带 BOM，
 并拒绝任何含中文的 `.bat`（这个坑踩过三次，见第六节）。

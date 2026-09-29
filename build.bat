@@ -48,6 +48,14 @@ if errorlevel 1 goto failed
  tests\EdgeTest.cs src\Program.cs src\MainForm.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
+rem Layout probe: opens the real form offscreen, reports every control that overflows its
+rem parent or overlaps a sibling, and can save screenshots (--shots). Handy when touching
+rem the UI. Previously it was compiled by hand -- which is exactly how the CI breakage of
+rem v1.0.2 happened (one build path updated, the other forgotten), so it lives here now.
+"%CSC%" %FLAGS% /target:exe /main:TomatoBiquga.LayoutProbe /out:"dist\_layoutprobe.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\LayoutProbe.cs %COMMON% %SITES%
+if errorlevel 1 goto failed
+
 echo [4/6] Building offline unit tests (no network needed, used by CI)...
 rem DirCache.KeyFor calls a static BiqugaSite helper, so the site sources are linked in
 rem as well. MainForm is linked too: the layout self-test builds a real (offscreen) form

@@ -764,6 +764,60 @@ namespace TomatoBiquga
                     }
                 }
             }
+
+            // ---- 设置对话框也要查：它以前同样是硬编码坐标，是老代码里最后一个没验过的界面 ----
+            try
+            {
+                Form dlg;
+                var problems = MainForm.CollectSettingsDialogProblems(out dlg);
+                using (dlg)
+                {
+                    Check("设置对话框无越界/重叠", problems.Count == 0);
+                    if (problems.Count > 0)
+                    {
+                        var head = new StringBuilder();
+                        for (int i = 0; i < problems.Count && i < 4; i++) head.Append(" | ").Append(problems[i]);
+                        Failures.Add("      设置对话框布局问题：" + head);
+                    }
+                    Check("设置对话框是固定尺寸（不能最大化）", dlg.FormBorderStyle == FormBorderStyle.FixedDialog && !dlg.MaximizeBox);
+                    Check("设置对话框有取消按钮（Esc 能关）", dlg.CancelButton != null);
+                    Check("设置对话框控件都真的加进去了", dlg.Controls.Count >= 4);
+                }
+            }
+            catch (Exception ex)
+            {
+                Record("设置对话框布局体检不抛异常", false, ex.GetType().Name + " " + ex.Message);
+            }
+
+            // ---- 设置对话框的值往返（几何对了，语义也得对）----
+            try
+            {
+                NumericUpDown[] nums;
+                var s = new AppSettings { BiqugaOfflineWorkers = 8, BiqugaOnlineWorkers = 6, BiqugaPcWorkers = 6, MinDelayMs = 60, RetryPasses = 1 };
+                using (var dlg = MainForm.BuildSettingsDialog(s, new Font("Microsoft YaHei UI", 9F), out nums))
+                {
+                    Eq("设置对话框：输入框数量", 5, nums.Length);
+                    Eq("设置对话框：离线并发初值", 8, (int)nums[0].Value);
+                    Eq("设置对话框：间隔初值", 60, (int)nums[3].Value);
+                    // 模拟用户改值 → 读回
+                    nums[0].Value = 12; nums[3].Value = 100; nums[4].Value = 2;
+                    MainForm.ReadSettingsDialog(nums, s);
+                    Eq("设置对话框：改后离线并发", 12, s.BiqugaOfflineWorkers);
+                    Eq("设置对话框：改后间隔", 100, s.MinDelayMs);
+                    Eq("设置对话框：最大间隔自动取 2 倍", 200, s.MaxDelayMs);
+                    Eq("设置对话框：改后重试轮数", 2, s.RetryPasses);
+                }
+                // 边界：超过上限的值要被夹住（NumericUpDown 自己会夹，Clamp 再兜一层）
+                var s2 = new AppSettings();
+                var wild = new NumericUpDown[5];
+                for (int i = 0; i < 5; i++) wild[i] = new NumericUpDown { Minimum = 0, Maximum = 100000, Value = 99999 };
+                MainForm.ReadSettingsDialog(wild, s2);
+                Check("设置对话框：超范围的值被夹到安全区间", s2.BiqugaOfflineWorkers <= 32 && s2.RetryPasses <= 3 && s2.MinDelayMs <= 5000);
+            }
+            catch (Exception ex)
+            {
+                Record("设置对话框值往返不抛异常", false, ex.GetType().Name + " " + ex.Message);
+            }
         }
 
         /// <summary>借 MainForm 的检查逻辑去查任意容器（只为自证检查器有效，不是产品逻辑）</summary>

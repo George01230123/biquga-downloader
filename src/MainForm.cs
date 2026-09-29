@@ -71,7 +71,7 @@ namespace TomatoBiquga
         public MainForm()
         {
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0.2（免安装单文件版）";
+            Text = "小说下载器 v1.0.3（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
@@ -362,6 +362,22 @@ namespace TomatoBiquga
             return problems;
         }
 
+        /// <summary>自检用：新建设置对话框、摆好布局、报告它的布局问题（不弹出来）</summary>
+        internal static List<string> CollectSettingsDialogProblems(out Form dialog)
+        {
+            NumericUpDown[] nums;
+            var dlg = BuildSettingsDialog(new AppSettings(), new Font("Microsoft YaHei UI", 9F), out nums);
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(-4000, -4000);
+            dlg.Show();
+            Application.DoEvents();
+            dlg.PerformLayout();
+            var problems = new List<string>();
+            CollectLayoutProblems(dlg, problems);
+            dialog = dlg;
+            return problems;
+        }
+
         private static void CollectLayoutProblems(Control parent, List<string> problems)
         {
             var kids = new List<Control>();
@@ -607,6 +623,141 @@ namespace TomatoBiquga
             if (bq != null) bq.CrawlWorkers = _settings.BiqugaPcWorkers;
         }
 
+        /// <summary>
+        /// 构建设置对话框（不 Show，方便自动化测试量它的布局）。
+        /// 布局用 TableLayoutPanel + Dock，不再硬编码坐标 —— 和主界面同一套原则，
+        /// 见 docs/界面布局.md。返回值里带上输入控件，调用方负责 ShowDialog 与取结果。
+        /// </summary>
+        internal static Form BuildSettingsDialog(AppSettings s, Font font, out NumericUpDown[] nums)
+        {
+            var dlg = new Form
+            {
+                Text = "设置（并发与重试）",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false,
+                Font = font,
+                ClientSize = new Size(470, 330),
+                AutoScaleMode = AutoScaleMode.Font,
+                AutoScaleDimensions = new SizeF(7F, 15F),
+            };
+
+            var tip = new Label
+            {
+                Text = "并发越大越快，但太大容易触发站点限速；8 是实测比较稳的值。改完立即生效。",
+                Dock = DockStyle.Top,
+                Height = 34,
+                ForeColor = Color.DimGray,
+            };
+
+            var table = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                Padding = new Padding(0),
+                AutoSize = false,
+            };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110F));
+
+            string[] labels = { "移动版·离线模式并发", "移动版·普通下载并发", "PC 版并发", "每章请求间隔(毫秒)", "失败章节自动重试(轮)" };
+            string[] hints =
+            {
+                "整本正文预抓的线程数（离线模式用）",
+                "普通下载的线程数（没勾离线模式时用）",
+                "PC 版站点的线程数",
+                "每次请求之间的随机间隔",
+                "整本下完后，只对失败章节再跑几轮（0=不重试）",
+            };
+            int[] values = { s.BiqugaOfflineWorkers, s.BiqugaOnlineWorkers, s.BiqugaPcWorkers, s.MinDelayMs, s.RetryPasses };
+            int[] mins = { 1, 1, 1, 1, 0 };
+            int[] maxs = { 32, 32, 32, 5000, 3 };
+
+            nums = new NumericUpDown[labels.Length];
+            for (int i = 0; i < labels.Length; i++)
+            {
+                var row = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Fill,
+                    ColumnCount = 2,
+                    RowCount = 2,
+                    Margin = new Padding(0, 0, 0, 6),
+                };
+                row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+                row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92F));
+                row.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+                row.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+                var lbl = new Label { Text = labels[i], Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+                nums[i] = new NumericUpDown
+                {
+                    Dock = DockStyle.Fill,
+                    Minimum = mins[i],
+                    Maximum = maxs[i],
+                    Value = Math.Min(Math.Max(values[i], mins[i]), maxs[i]),
+                    Margin = new Padding(4, 0, 0, 0),
+                };
+                var hint = new Label
+                {
+                    Text = hints[i],
+                    Dock = DockStyle.Fill,
+                    ForeColor = Color.Gray,
+                    Font = new Font(font.FontFamily, font.Size - 1F),
+                };
+                row.Controls.Add(lbl, 0, 0);
+                row.Controls.Add(nums[i], 1, 0);
+                row.Controls.Add(hint, 0, 1);
+                row.SetColumnSpan(hint, 2);
+
+                table.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+                table.Controls.Add(row, 0, i);
+            }
+
+            var path = new Label
+            {
+                Text = "配置文件：" + AppSettings.DefaultPath,
+                Dock = DockStyle.Bottom,
+                Height = 20,
+                ForeColor = Color.Gray,
+            };
+
+            var ok = new Button { Text = "保存", Width = 84, Height = 28, DialogResult = DialogResult.OK, Margin = new Padding(4, 4, 4, 4) };
+            var cancel = new Button { Text = "取消", Width = 84, Height = 28, DialogResult = DialogResult.Cancel, Margin = new Padding(4, 4, 4, 0) };
+            var buttons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 40,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                Padding = new Padding(0, 4, 4, 4),
+            };
+            buttons.Controls.Add(cancel);
+            buttons.Controls.Add(ok);
+
+            dlg.Controls.Add(table);
+            dlg.Controls.Add(path);
+            dlg.Controls.Add(buttons);
+            dlg.Controls.Add(tip);
+            dlg.AcceptButton = ok;
+            dlg.CancelButton = cancel;
+            return dlg;
+        }
+
+        /// <summary>把对话框里的值写回设置对象（与界面解耦，方便测试）</summary>
+        internal static void ReadSettingsDialog(NumericUpDown[] nums, AppSettings s)
+        {
+            if (nums == null || s == null) return;
+            s.BiqugaOfflineWorkers = (int)nums[0].Value;
+            s.BiqugaOnlineWorkers = (int)nums[1].Value;
+            s.BiqugaPcWorkers = (int)nums[2].Value;
+            s.MinDelayMs = (int)nums[3].Value;
+            s.MaxDelayMs = Math.Max(s.MinDelayMs, s.MinDelayMs * 2);
+            s.RetryPasses = (int)nums[4].Value;
+            s.Clamp();
+        }
+
         /// <summary>设置对话框：并发数 / 请求间隔 / 重试轮数（改完立即生效并写盘）</summary>
         private void DoSettings()
         {
@@ -621,67 +772,11 @@ namespace TomatoBiquga
                 RetryPasses = _settings.RetryPasses,
             };
 
-            using (var dlg = new Form())
+            NumericUpDown[] nums;
+            using (var dlg = BuildSettingsDialog(s, Font, out nums))
             {
-                dlg.Text = "设置（并发与重试）";
-                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-                dlg.StartPosition = FormStartPosition.CenterParent;
-                dlg.MinimizeBox = false;
-                dlg.MaximizeBox = false;
-                dlg.ClientSize = new Size(452, 312);
-                dlg.Font = Font;
-                dlg.ShowInTaskbar = false;
-
-                var tip = new Label
-                {
-                    Text = "并发越大越快，但太大容易触发站点限速。8 是实测比较稳的值。\n" +
-                           "改完立即生效；配置文件：" + AppSettings.DefaultPath,
-                    Location = new Point(14, 10),
-                    Size = new Size(424, 44),
-                    ForeColor = Color.DimGray,
-                };
-
-                var nums = new NumericUpDown[5];
-                string[] labels = { "移动版·离线模式并发", "移动版·普通下载并发", "PC 版并发", "每章请求间隔(毫秒)", "失败章节自动重试(轮)" };
-                int[] values = { s.BiqugaOfflineWorkers, s.BiqugaOnlineWorkers, s.BiqugaPcWorkers, s.MinDelayMs, s.RetryPasses };
-                int[] min = { 1, 1, 1, 0, 0 };
-                int[] max = { 32, 32, 32, 5000, 3 };
-                for (int i = 0; i < nums.Length; i++)
-                {
-                    dlg.Controls.Add(new Label { Text = labels[i], Location = new Point(16, 66 + i * 30), Size = new Size(190, 22), TextAlign = ContentAlignment.MiddleLeft });
-                    nums[i] = new NumericUpDown
-                    {
-                        Location = new Point(212, 66 + i * 30),
-                        Width = 80,
-                        Minimum = min[i],
-                        Maximum = max[i],
-                        Value = values[i],
-                    };
-                    dlg.Controls.Add(nums[i]);
-                }
-                dlg.Controls.Add(new Label
-                {
-                    Text = "（间隔取 1~2 倍随机值，避免固定节奏被识别）",
-                    Location = new Point(300, 156),
-                    Size = new Size(150, 40),
-                    ForeColor = Color.Gray,
-                });
-
-                var ok = new Button { Text = "保存", Location = new Point(262, 262), Width = 84, Height = 28, DialogResult = DialogResult.OK };
-                var cancel = new Button { Text = "取消", Location = new Point(352, 262), Width = 84, Height = 28, DialogResult = DialogResult.Cancel };
-                dlg.Controls.Add(ok);
-                dlg.Controls.Add(cancel);
-                dlg.AcceptButton = ok;
-                dlg.CancelButton = cancel;
-
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-
-                s.BiqugaOfflineWorkers = (int)nums[0].Value;
-                s.BiqugaOnlineWorkers = (int)nums[1].Value;
-                s.BiqugaPcWorkers = (int)nums[2].Value;
-                s.MinDelayMs = (int)nums[3].Value;
-                s.MaxDelayMs = Math.Max(s.MinDelayMs, s.MinDelayMs * 2);
-                s.RetryPasses = (int)nums[4].Value;
+                ReadSettingsDialog(nums, s);
             }
 
             _settings = s;
