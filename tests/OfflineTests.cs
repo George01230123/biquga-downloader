@@ -139,6 +139,11 @@ namespace TomatoBiquga
                 TestFixHeaderNow(work);
                 TestMissingReport(work);
                 TestProgressMarker(work);
+                TestChapterIndex(work);
+                TestSiteProfile(work);
+                TestMarkdown(work);
+                TestFillMissing(work, ref _fakeNet);
+                TestOutputEncoding(work, ref _fakeNet);
                 TestIncrementalAppend(work, ref _fakeNet);
                 TestEpub(work);
                 TestParseTxt(work);
@@ -754,6 +759,19 @@ namespace TomatoBiquga
 
                             var problems = f.CollectLayoutProblems();
                             Check("布局无越界/重叠（" + where + "）", problems.Count == 0);
+
+                            // 光"不越界"还不够：按钮漏加/被藏起来也看不出来。
+                            // 这里把每个按钮都点名检查一遍（加功能时最容易犯的错就是把按钮忘了加进面板）。
+                            var texts = new List<string>();
+                            CollectButtonTexts(f, texts);
+                            foreach (var want in new[]
+                            {
+                                "全选", "全不选", "反选", "下载选中", "下载全部",
+                                "更新新章节", "补齐缺章", "取消", "导出 EPUB", "导出 Markdown", "打开目录",
+                            })
+                            {
+                                Check("按钮在位：" + want + "（" + where + "）", texts.Contains(want));
+                            }
                             if (problems.Count > 0)
                             {
                                 var head = new StringBuilder();
@@ -823,6 +841,16 @@ namespace TomatoBiquga
             catch (Exception ex)
             {
                 Record("设置对话框值往返不抛异常", false, ex.GetType().Name + " " + ex.Message);
+            }
+        }
+
+        /// <summary>收集窗体里所有按钮的文本（检查"按钮是不是真的加进面板了"）</summary>
+        private static void CollectButtonTexts(Control parent, List<string> into)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                if (c is Button && !string.IsNullOrEmpty(c.Text)) into.Add(c.Text);
+                if (c.HasChildren) CollectButtonTexts(c, into);
             }
         }
 
@@ -1062,6 +1090,451 @@ namespace TomatoBiquga
             Check("字节查找：找不到时返回 -1", DownloadRunner.IndexOfBytes(bytes, 0, bytes.Length, Encoding.UTF8.GetBytes("这段字不存在")) < 0);
         }
 
+        // ============================================================
+        //  11.5) 章节锚点与按章插入（缺章补齐 / 章节级续传的地基）
+        // ============================================================
+
+        private static void TestChapterIndex(string work)
+        {
+            var dir = Path.Combine(work, "anchors");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "锚点测试.txt");
+
+            var book = new BookInfo { Site = "biquga", Title = "锚点测试", Author = "作者", Dir = "/1_1/", Url = "u" };
+            var all = new List<ChapterInfo>();
+            for (int i = 1; i <= 6; i++)
+                all.Add(new ChapterInfo { Id = "h" + (3000 + i), Title = "第" + i + "章 标题" + i, Order = i });
+            book.Chapters.AddRange(all);
+
+            // 造一个"缺第 3、5 章"的文件（模拟站点侧空内容被跳过）。
+            // 表头用产品自己的 BuildHeaderZone()：手搓补白长度会和真实格式不一致，
+            // 测出来的"正文起点"就没有参考价值（第一版就是手搓的，断言因此误报）。
+            var seed = new DownloadRunner { Book = book, Chapters = all, OutputFile = path, BookDir = dir };
+            seed.Ok = 4; seed.Skipped = 2;
+            using (var w = new StreamWriter(path, false, new UTF8Encoding(true)))
+            {
+                w.Write(seed.BuildHeaderZone());
+                foreach (var c in new[] { all[0], all[1], all[3], all[4] })
+                    w.Write(ChapterIndex.BuildChapterBlock(c.Id, c.Title,
+                        "这是 " + c.Title + " 的正文内容，长度足够超过四十个字的门槛，用来通过 空章节 的判断。"));
+            }
+
+            // ---- 扫描 ----
+            Check("锚点：文件里能扫到锚点", ChapterIndex.HasAnchors(path));
+            var spans = ChapterIndex.Scan(path);
+            Eq("锚点：扫到 4 章", 4, spans.Count);
+            Eq("锚点：第一章 id", "h3001", spans[0].Id);
+            Eq("锚点：每章标题", "第1章 标题1", spans[0].Title);
+            Check("锚点：正文非空（HasBody）", spans[0].HasBody);
+            Check("锚点：章节区间连续（前一章 End = 后一章 Start）", spans[0].End == spans[1].Start);
+            Check("锚点：最后一章 End 到文件末尾",
+                spans[spans.Count - 1].End == new FileInfo(path).Length);
+            var byId = ChapterIndex.ById(spans);
+            Check("锚点：能按 id 查到", byId.ContainsKey("h3004"));
+
+            // 锚点行不能污染正文：正文里应当看不到锚点文本被当成内容
+            var text = File.ReadAllText(path, Encoding.UTF8);
+            Contains("锚点：文件里确实有锚点行", text, ChapterIndex.AnchorPrefix + "h3001");
+
+            // ---- 插入缺失的第 3 章（应插在第 2 章之后、第 4 章之前）----
+            var c3 = all[2];
+            var body3 = "这是 " + c3.Title + " 的正文内容，长度足够超过四十个字的门槛，用来通过 空章节 的判断。";
+            Check("插入：第 3 章尚未在文件里", !ChapterIndex.ById(ChapterIndex.Scan(path)).ContainsKey(c3.Id));
+            Check("插入：按章插入成功", ChapterIndex.InsertChapter(path, book, c3, body3));
+
+            var spans2 = ChapterIndex.Scan(path);
+            Eq("插入：现在有 5 章", 5, spans2.Count);
+            var order2 = new List<string>();
+            foreach (var s in spans2) order2.Add(s.Id);
+            Eq("插入：顺序正确（h3003 排在第 2、4 章之间）", "h3001,h3002,h3003,h3004,h3005", string.Join(",", order2));
+            var t2 = File.ReadAllText(path, Encoding.UTF8);
+            Contains("插入：正文真的写进去了", t2, "这是 第3章 标题3 的正文内容");
+            Check("插入：老正文没被破坏", t2.Contains("这是 第2章 标题2 的正文内容") && t2.Contains("这是 第4章 标题4 的正文内容"));
+
+            // ---- 再插入第 5 章（这次是"中间再少一章"的另一种情形）----
+            var c5 = all[4];
+            Check("插入：按章插入第 5 章", ChapterIndex.InsertChapter(path, book, c5,
+                "这是 " + c5.Title + " 的正文内容，长度足够超过四十个字的门槛，用来通过 空章节 的判断。"));
+            var order3 = new List<string>();
+            foreach (var s in ChapterIndex.Scan(path)) order3.Add(s.Id);
+            Eq("插入：6 章顺序全对", "h3001,h3002,h3003,h3004,h3005", string.Join(",", order3));
+
+            // ---- 第 6 章（目录里最后一章）应追加到末尾 ----
+            var c6 = all[5];
+            Check("插入：末尾追加成功", ChapterIndex.InsertChapter(path, book, c6,
+                "这是 " + c6.Title + " 的正文内容，长度足够超过四十个字的门槛，用来通过 空章节 的判断。"));
+            var order4 = new List<string>();
+            foreach (var s in ChapterIndex.Scan(path)) order4.Add(s.Id);
+            Eq("插入：补齐后 6 章齐全且顺序正确", "h3001,h3002,h3003,h3004,h3005,h3006", string.Join(",", order4));
+
+            // ---- 重复插入同一章 = 原位替换（不能变成两份）----
+            Check("插入：已存在的章走原位替换", ChapterIndex.InsertChapter(path, book, c6, "替换后的正文内容，长度也足够超过四十个字的门槛，用来通过判断。"));
+            Eq("插入：替换后章数不变", 6, ChapterIndex.Scan(path).Count);
+            var t4 = File.ReadAllText(path, Encoding.UTF8);
+            Contains("插入：替换后的内容生效", t4, "替换后的正文内容");
+            Check("插入：被替换的旧内容没留下第二份", !t4.Contains("这是 第6章 标题6 的正文内容"));
+
+            // ---- 表头不能被插入动作破坏 ----
+            Contains("插入：表头仍在（46 个等号行）", t4, new string('=', 46));
+            Contains("插入：进度标记仍在", t4, DownloadRunner.ProgressOkMarker);
+            int markerAt = t4.IndexOf(DownloadRunner.HeaderZoneMarker, StringComparison.Ordinal);
+            int zoneEnd = t4.IndexOf('\n', markerAt) + 1;
+            Check("插入：正文（第一个锚点）在表头区之后",
+                t4.IndexOf(ChapterIndex.AnchorPrefix, StringComparison.Ordinal) > zoneEnd);
+
+            // ---- 旧文件（没有锚点）不能崩，且要明确"不支持按章插入" ----
+            var legacy = Path.Combine(dir, "旧格式.txt");
+            File.WriteAllText(legacy,
+                "旧书\r\n作者：A\r\n来源：笔趣阁　u\r\n本次下载：成功 1 章，跳过 0 章，失败 0 章\r\n下载时间：x\r\n" +
+                new string('=', 46) + "\r\n\r\n第1章 旧章\r\n----\r\n\r\n正文。\r\n", new UTF8Encoding(true));
+            Check("旧文件：扫不到锚点", !ChapterIndex.HasAnchors(legacy));
+            Eq("旧文件：扫描返回空表", 0, ChapterIndex.Scan(legacy).Count);
+            Check("旧文件：按章插入明确失败（而不是写坏文件）",
+                !ChapterIndex.InsertChapter(legacy, book, all[0], "不该写进去的正文，长度足够超过四十个字门槛，用来验证。"));
+            Check("旧文件：内容没被改动", File.ReadAllText(legacy, Encoding.UTF8).Contains("正文。"));
+
+            // ---- 边界 ----
+            Eq("边界：不存在的文件扫描返回空", 0, ChapterIndex.Scan(Path.Combine(dir, "没有.txt")).Count);
+            Check("边界：不存在的文件插入返回 false",
+                !ChapterIndex.InsertChapter(Path.Combine(dir, "没有.txt"), book, all[0], "x"));
+            Check("边界：Splice 越界参数被拒绝", !ChapterIndex.Splice(path, 10, 99999999, "x"));
+            Eq("边界：锚点文本格式", ChapterIndex.AnchorPrefix + "abc" + ChapterIndex.AnchorSuffix + "\n", ChapterIndex.AnchorOf("abc"));
+            Eq("边界：id 为空也能生成锚点", ChapterIndex.AnchorPrefix + ChapterIndex.AnchorSuffix + "\n", ChapterIndex.AnchorOf(null));
+        }
+        // ============================================================
+        //  11.6) 站点配置（只允许连接/编码参数，拒绝任何内容提取规则）
+        // ============================================================
+
+        private static void TestSiteProfile(string work)
+        {
+            var dir = Path.Combine(work, "profile");
+            Directory.CreateDirectory(dir);
+
+            var defs = SiteProfileStore.Defaults();
+            Check("站点配置：有三个内置站点", defs.Count >= 3);
+            var m = SiteProfileStore.Get("biquga-m");
+            Eq("站点配置：移动版默认并发", 8, m.Workers);
+            Check("站点配置：默认编码是 utf-8", m.IsUtf8(m.OutputEncoding));
+            Check("站点配置：默认 UA 为空（用内置的）", m.UserAgent.Length == 0);
+
+            // 正常改：并发/间隔/编码/UA
+            var path = Path.Combine(dir, "站点配置.ini");
+            File.WriteAllText(path,
+                "# 注释行\r\n" +
+                "[biquga-m]\r\n" +
+                "workers=12\r\n" +
+                "mindelayms=30\r\n" +
+                "maxdelayms=90\r\n" +
+                "timeoutseconds=40\r\n" +
+                "maxretries=5\r\n" +
+                "outputencoding=gbk\r\n" +
+                "useragent=MyTestUA/1.0\r\n" +
+                "[自定义站]\r\n" +
+                "workers=3\r\n", new UTF8Encoding(true));
+
+            var list = SiteProfileStore.Load(path);
+            SiteProfile p = null, custom = null;
+            foreach (var x in list)
+            {
+                if (x.Name == "biquga-m") p = x;
+                if (x.Name == "自定义站") custom = x;
+            }
+            Check("站点配置：能读到移动版这一节", p != null);
+            Eq("站点配置：workers 生效", 12, p.Workers);
+            Eq("站点配置：间隔生效", 30, p.MinDelayMs);
+            Eq("站点配置：超时生效", 40, p.TimeoutSeconds);
+            Eq("站点配置：重试生效", 5, p.MaxRetries);
+            Eq("站点配置：UA 生效", "MyTestUA/1.0", p.UserAgent);
+            Check("站点配置：编码切到 gbk", p.IsGbk(p.OutputEncoding));
+            Check("站点配置：gbk 编码对象可用", p.FileEncoding() != null);
+            Check("站点配置：新站点也能加", custom != null && custom.Workers == 3);
+
+            // ★ 合规闸门：内容提取类参数必须被拒绝
+            var badPath = Path.Combine(dir, "带规则的.ini");
+            File.WriteAllText(badPath,
+                "[biquga-m]\r\n" +
+                "workers=8\r\n" +
+                "contentSelector=.content p\r\n" +
+                "regex=<div id=\"content\">(.*?)</div>\r\n" +
+                "xpath=//div[@id='content']\r\n", new UTF8Encoding(true));
+            var badList = SiteProfileStore.Load(badPath);
+            Check("站点配置：拒绝提取规则后给出说明", !string.IsNullOrEmpty(SiteProfileStore.LastError));
+            Contains("站点配置：说明里点明原因", SiteProfileStore.LastError, "内容提取规则");
+            SiteProfile bm = null;
+            foreach (var x in badList) if (x.Name == "biquga-m") bm = x;
+            Eq("站点配置：合法参数仍然生效（只有非法键被忽略）", 8, bm.Workers);
+
+            // 数值越界要被夹住
+            var clampPath = Path.Combine(dir, "越界.ini");
+            File.WriteAllText(clampPath, "[biquga-m]\r\nworkers=999\r\nmindelayms=-5\r\nmaxdelayms=1\r\n", new UTF8Encoding(true));
+            var cp = SiteProfileStore.Get("biquga-m");
+            var cl = SiteProfileStore.Load(clampPath);
+            foreach (var x in cl) if (x.Name == "biquga-m") cp = x;
+            Check("站点配置：并发被夹到 32 以内", cp.Workers <= 32 && cp.Workers >= 1);
+            Check("站点配置：最大间隔不小于最小间隔", cp.MaxDelayMs >= cp.MinDelayMs);
+
+            // 文件不存在/损坏 → 回退默认值，不抛异常
+            var none = SiteProfileStore.Load(Path.Combine(dir, "没有这个文件.ini"));
+            Eq("站点配置：文件不存在时回退默认（仍有 3 个站点）", 3, none.Count);
+            var broken = Path.Combine(dir, "损坏.ini");
+            File.WriteAllBytes(broken, new byte[] { 0xFF, 0xFE, 0x00, 0x01, 0x02 });
+            bool threw = false;
+            try { SiteProfileStore.Load(broken); } catch { threw = true; }
+            Check("站点配置：损坏文件不抛异常", !threw);
+
+            // 样例文件能生成且能被自己读回
+            var sample = Path.Combine(dir, "样例.ini");
+            SiteProfileStore.SaveSample(sample, SiteProfileStore.Defaults());
+            Check("站点配置：样例文件已生成", File.Exists(sample));
+            var back = SiteProfileStore.Load(sample);
+            Eq("站点配置：样例能被自己读回（站点数一致）", 3, back.Count);
+        }
+
+        // ============================================================
+        //  11.7) Markdown 导出
+        // ============================================================
+
+        private static void TestMarkdown(string work)
+        {
+            var dir = Path.Combine(work, "md");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "导出测试.md");
+
+            var book = new BookInfo
+            {
+                Site = "biquga", Title = "导出测试", Author = "测试作者",
+                Desc = "简介里有 <尖括号> 和 & 符号。", Dir = "/1_2/", Url = "https://www.biquga.com/1_2/",
+            };
+            var chapters = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "1", Title = "第一章 开始", Text = "第一段。\n\n# 这行以井号开头，不能被当成标题\n- 这行以减号开头\n2. 这行像列表\n普通段落 & <符号>。", Order = 1 },
+                new ChapterInfo { Id = "2", Title = "第二章 继续", Text = "正文二。", Order = 2 },
+                new ChapterInfo { Id = "3", Title = "第三章 空", Text = "", Order = 3 },              // 空章要跳过
+                new ChapterInfo { Id = "4", Title = "第一卷", Text = "x", IsVolume = true, Order = 4 }, // 分卷行要跳过
+            };
+
+            MarkdownWriter.Write(path, book, chapters, true);
+            Check("Markdown：文件已生成", File.Exists(path) && new FileInfo(path).Length > 100);
+            var md = File.ReadAllText(path, Encoding.UTF8);
+
+            Check("Markdown：有 YAML front matter", md.StartsWith("---\n"));
+            Contains("Markdown：front matter 里有书名", md, "title: \"导出测试\"");
+            Contains("Markdown：front matter 里有作者", md, "author: \"测试作者\"");
+            Contains("Markdown：front matter 里有章节数", md, "chapters: 2");
+            Contains("Markdown：一级标题是书名", md, "# 导出测试");
+            Contains("Markdown：有目录", md, "## 目录");
+            Contains("Markdown：目录里有锚点链接", md, "(#ch0001)");
+            Contains("Markdown：有锚点定义", md, "<a id=\"ch0001\"></a>");
+            Contains("Markdown：章节是二级标题", md, "## 第一章 开始");
+            Contains("Markdown：正文段落", md, "第一段。");
+            Check("Markdown：空章节没被导出", md.IndexOf("第三章 空", StringComparison.Ordinal) < 0);
+            Check("Markdown：分卷行没被导出", md.IndexOf("## 第一卷", StringComparison.Ordinal) < 0);
+
+            // 正文里会破坏结构的行必须被转义
+            Contains("Markdown：行首井号被转义", md, "\\# 这行以井号开头");
+            Contains("Markdown：行首减号被转义", md, "\\- 这行以减号开头");
+            Contains("Markdown：形似有序列表的行被转义", md, "\\2. 这行像列表");
+            Check("Markdown：普通正文没被乱转义", md.Contains("普通段落 & <符号>。"));
+
+            // 不带目录
+            var path2 = Path.Combine(dir, "无目录.md");
+            MarkdownWriter.Write(path2, book, chapters, false);
+            var md2 = File.ReadAllText(path2, Encoding.UTF8);
+            Check("Markdown：可以选择不生成目录", md2.IndexOf("## 目录", StringComparison.Ordinal) < 0);
+            Contains("Markdown：不生成目录时章节仍在", md2, "## 第一章 开始");
+
+            // 没有正文 → 明确报错，不生成空文件
+            bool threw = false;
+            try { MarkdownWriter.Write(Path.Combine(dir, "空.md"), book, new List<ChapterInfo> { new ChapterInfo { Id = "9", Title = "空", Text = "" } }, true); }
+            catch (Exception ex) { threw = ex.Message.IndexOf("先下载", StringComparison.Ordinal) >= 0; }
+            Check("Markdown：没有正文时明确报错", threw);
+
+            // 转义函数
+            Eq("Markdown 转义：井号", "\\#a", MarkdownWriter.Escape("#a"));
+            Eq("Markdown 转义：星号", "\\*a\\*", MarkdownWriter.Escape("*a*"));
+            Eq("Markdown：YAML 里的引号被换掉", "\"a'b\"", MarkdownWriter.Yaml("a\"b"));
+            Eq("Markdown：YAML 空值", "\"\"", MarkdownWriter.Yaml(null));
+        }
+        // ============================================================
+        //  11.75) 输出编码（站点配置里可以设 gbk）
+        // ============================================================
+
+        private static void TestOutputEncoding(string work, ref int fakeNet)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "novel-enc-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            var book = new BookInfo { Site = "biquga", Title = "编码测试", Author = "作者", Dir = "/5_5/", Url = "u" };
+            var chs = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "e1", Title = "第一章 中文标题", Order = 1 },
+                new ChapterInfo { Id = "e2", Title = "第二章 也是中文", Order = 2 },
+            };
+            book.Chapters.AddRange(chs);
+            string bd, path;
+            DownloadRunner.ResolvePaths(dir, book.Title, out bd, out path);
+
+            // 默认：UTF-8 带 BOM
+            var r1 = new DownloadRunner { Site = new FakeSite(ref fakeNet), Book = book, Chapters = chs, RootDir = dir, Log = delegate { } };
+            r1.Run();
+            var b1 = File.ReadAllBytes(path);
+            Check("编码：默认写 UTF-8 带 BOM",
+                b1.Length >= 3 && b1[0] == 0xEF && b1[1] == 0xBB && b1[2] == 0xBF);
+            Check("编码：UTF-8 文件里能读到中文", File.ReadAllText(path, Encoding.UTF8).Contains("编码测试"));
+
+            // 站点配置指定 GBK
+            var prof = SiteProfileStore.Get("biquga-m");
+            prof.OutputEncoding = "gbk";
+            var gbk = prof.FileEncoding();
+            Eq("编码：站点配置能给出 GBK 编码对象", 936, gbk.CodePage);
+
+            // 路径必须用 ResolvePaths 算（它是 root\书名\书名.txt）
+            string bd2, path2;
+            DownloadRunner.ResolvePaths(dir, book.Title, out bd2, out path2);
+            var r2 = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet), Book = book, Chapters = chs,
+                RootDir = dir, OutputEncoding = gbk, Log = delegate { },
+            };
+            r2.Run();
+            var b2 = File.ReadAllBytes(path2);
+            var b1Utf8Len = b1.Length;
+            Check("编码：GBK 文件不写 UTF-8 BOM", !(b2.Length >= 3 && b2[0] == 0xEF));
+            var textGbk = File.ReadAllText(path2, Encoding.GetEncoding("GBK"));
+            // 表头区也必须用 GBK 写：FixHeaderNow 会原位重写表头，之前那里写死了 UTF-8，
+            // 结果 GBK 文件的表头是坏字节（这条断言就是抓这个的）
+            Check("编码：GBK 文件的表头也能用 GBK 读出 46 个等号",
+                textGbk.IndexOf(new string('=', 46), StringComparison.Ordinal) > 0);
+            Check("编码：GBK 文件用 GBK 能正常读回中文", textGbk.Contains("编码测试") && textGbk.Contains("中文标题"));
+            Check("编码：GBK 文件用 UTF-8 读会乱码（证明确实是 GBK）",
+                !File.ReadAllText(path2, Encoding.UTF8).Contains("编码测试"));
+
+            // 截断的 GBK 字节数应当小于 UTF-8（中文在 GBK 里 2 字节，UTF-8 里 3 字节）
+            Check("编码：GBK 文件体积小于 UTF-8（中文 2 字节 vs 3 字节）", b2.Length < b1Utf8Len);
+
+            TryDeleteDir(dir);
+        }
+        // ============================================================
+        //  11.8) 缺章补齐 / 章节级续传（同一个 FillMissing，两种场景）
+        // ============================================================
+
+        private static void TestFillMissing(string work, ref int fakeNet)
+        {
+            // ---------- 场景 A：整本下完了，中间有几个洞（站点侧空内容）----------
+            var dirA = Path.Combine(Path.GetTempPath(), "novel-fill-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dirA);
+            var book = new BookInfo { Site = "biquga", Title = "补齐测试", Author = "作者", Dir = "/7_7/", Url = "u" };
+            var all = new List<ChapterInfo>();
+            for (int i = 1; i <= 10; i++)
+                all.Add(new ChapterInfo { Id = "m" + (5000 + i), Title = "第" + i + "章 标题" + i, Order = i });
+            book.Chapters.AddRange(all);
+            string bdA, pathA;
+            DownloadRunner.ResolvePaths(dirA, book.Title, out bdA, out pathA);
+
+            // 造一个"缺第 3、4、8 章"的文件（这几章当时是站点空内容）
+            var seed = new DownloadRunner { Site = new FakeSite(ref fakeNet), Book = book, Chapters = all, RootDir = dirA, Log = delegate { } };
+            var kept = new List<ChapterInfo>();
+            foreach (var c in all) if (c.Id != "m5003" && c.Id != "m5004" && c.Id != "m5008") kept.Add(c);
+            seed.Chapters = kept;
+            seed.Run();
+            Eq("补齐：起始文件写了 7 章", 7, seed.Ok);
+            var order0 = new List<string>();
+            foreach (var s in ChapterIndex.Scan(pathA)) order0.Add(s.Id);
+            Eq("补齐：起始状态确实是 7 章且缺 3 章", "m5001,m5002,m5005,m5006,m5007,m5009,m5010", string.Join(",", order0));
+
+            long sizeBefore = new FileInfo(pathA).Length;
+            var runner = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = book,
+                Chapters = new List<ChapterInfo>(),      // FillMissing 会自己填
+                RootDir = dirA,
+                Log = delegate { },
+            };
+            var logs = new List<string>();
+            DownloadRunner.FillMissing(runner, pathA, logs.Add);
+            Eq("补齐：只抓了缺的 3 章", 3, runner.Ok);
+
+            var spansA = ChapterIndex.Scan(pathA);
+            var orderA = new List<string>();
+            foreach (var s in spansA) orderA.Add(s.Id);
+            Eq("补齐：10 章齐全且顺序正确", "m5001,m5002,m5003,m5004,m5005,m5006,m5007,m5008,m5009,m5010", string.Join(",", orderA));
+            Eq("补齐：章数从 7 变 10", 10, spansA.Count);
+
+            var textA = File.ReadAllText(pathA, Encoding.UTF8);
+            Contains("补齐：补上的第 3 章正文在文件里", textA, "第3章 标题3");
+            Contains("补齐：老章节正文没被破坏", textA, "第1章 标题1");
+            Check("补齐：文件只变长", new FileInfo(pathA).Length > sizeBefore);
+            Contains("补齐：表头统计行更新为 10 章", textA, "成功 10 章");
+            int progA; string fpA; int bcA;
+            DownloadRunner.TryReadProgress(pathA, out progA, out fpA, out bcA);
+            Eq("补齐：进度标记也更新成 10 章", 10, progA);
+            Check("补齐：有日志说明补了几章", logs.Exists(l => l.Contains("缺") && l.Contains("章")));
+
+            // 再跑一次：已经没有缺口了，应该什么都不做
+            var again = new DownloadRunner { Site = new FakeSite(ref fakeNet), Book = book, Chapters = new List<ChapterInfo>(), Log = delegate { } };
+            var logs2 = new List<string>();
+            DownloadRunner.FillMissing(again, pathA, logs2.Add);
+            Eq("补齐：再跑一次不重复下载", 0, again.Ok);
+            Check("补齐：明确告知没有需要补的", logs2.Exists(l => l.Contains("没有需要补齐")));
+
+            // ---------- 场景 B：断点续传（上半本下完，中断后继续）----------
+            var dirB = Path.Combine(Path.GetTempPath(), "novel-resume-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dirB);
+            var book2 = new BookInfo { Site = "biquga", Title = "续传测试", Author = "作者", Dir = "/8_8/", Url = "u" };
+            var all2 = new List<ChapterInfo>();
+            for (int i = 1; i <= 10; i++)
+                all2.Add(new ChapterInfo { Id = "r" + (6000 + i), Title = "第" + i + "章", Order = i });
+            book2.Chapters.AddRange(all2);
+            string bdB, pathB;
+            DownloadRunner.ResolvePaths(dirB, book2.Title, out bdB, out pathB);
+
+            // 模拟"下到第 4 章就被中断"：写前 4 章
+            var half = new DownloadRunner { Site = new FakeSite(ref fakeNet), Book = book2, Chapters = all2.GetRange(0, 4), RootDir = dirB, Log = delegate { } };
+            half.Run();
+            Eq("续传：中断时文件里有 4 章", 4, half.Ok);
+            int before; string fpB; int bcB;
+            DownloadRunner.TryReadProgress(pathB, out before, out fpB, out bcB);
+            Eq("续传：进度标记是 4 章", 4, before);
+
+            // 用户重新点"下载全部章节"：续传应该只补剩下的 6 章
+            // 故意不设 RootDir：FillMissing 应当能从文件路径自推出来（这条回落逻辑也要测）
+            var resume = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = book2,
+                Chapters = new List<ChapterInfo>(),
+                Log = delegate { },
+            };
+            var logs3 = new List<string>();
+            DownloadRunner.FillMissing(resume, pathB, logs3.Add);
+            Eq("续传：只下了剩下的 6 章", 6, resume.Ok);
+            Check("续传：调用方没给 RootDir 时也能自推出来", !string.IsNullOrEmpty(resume.RootDir));
+
+            var orderB = new List<string>();
+            foreach (var s in ChapterIndex.Scan(pathB)) orderB.Add(s.Id);
+            Eq("续传：10 章齐全且顺序正确",
+                "r6001,r6002,r6003,r6004,r6005,r6006,r6007,r6008,r6009,r6010", string.Join(",", orderB));
+            int after; string fpB2; int bcB2;
+            DownloadRunner.TryReadProgress(pathB, out after, out fpB2, out bcB2);
+            Eq("续传：进度变成 10 章", 10, after);
+            var textB = File.ReadAllText(pathB, Encoding.UTF8);
+            Contains("续传：上半本正文还在", textB, "第1章");
+            Contains("续传：下半本补上了", textB, "第10章");
+
+            // ---------- 场景 C：旧文件（无锚点）要明确拒绝而不是写坏 ----------
+            var legacy = Path.Combine(dirB, "旧格式.txt");
+            File.WriteAllText(legacy, "旧书\r\n作者：A\r\n来源：x\r\n本次下载：成功 1 章\r\n下载时间：x\r\n" +
+                new string('=', 46) + "\r\n\r\n第1章\r\n----\r\n\r\n正文。\r\n", new UTF8Encoding(true));
+            var old = new DownloadRunner { Site = new FakeSite(ref fakeNet), Book = book2, Chapters = new List<ChapterInfo>(), Log = delegate { } };
+            var logs4 = new List<string>();
+            DownloadRunner.FillMissing(old, legacy, logs4.Add);
+            Eq("补齐：旧格式文件不下载任何章", 0, old.Ok);
+            Check("补齐：明确提示需要重新下载", logs4.Exists(l => l.Contains("锚点") || l.Contains("重新下载")));
+            Check("补齐：旧文件内容没被动", File.ReadAllText(legacy, Encoding.UTF8).Contains("正文。"));
+
+            TryDeleteDir(dirA);
+            TryDeleteDir(dirB);
+        }
         // ============================================================
         //  12) EPUB 导出（结构必须符合规范，否则阅读器打不开）
         // ============================================================

@@ -20,7 +20,7 @@
 ## 一、快速开始
 
 **下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
-（`novel-downloader-v1.0.4-win64.zip`，约 55 KB）
+（`novel-downloader-v1.0.5-win64.zip`，约 55 KB）
 
 > **打不开 github.com？**（国内网络常见，本项目开发期间实测断过两次）
 > `api.github.com` 通常还是通的，粘这段到 PowerShell 就能下（不用改任何东西）：
@@ -53,10 +53,13 @@
 | 刷新目录 | 忽略缓存，强制重新遍历站点（拿最新章节时用） |
 | ☑ 离线模式 | 载入目录时把正文一起抓下来，之后下载**不再联网**（强烈建议勾上） |
 | 下载全部 / 下载选中 | 每 20 章落一次盘，可随时取消 |
-| **更新新章节** | 站点更新了只下新章节，追加到已有 txt 末尾（老正文一字不动） |
+| **更新新章节** | 站点更新了只下新章节（老正文一字不动）|
 | **导出 EPUB** | 把已下载的正文导出成 EPUB，手机阅读器直接打开（不联网） |
+| **导出 Markdown** | 导出带 YAML 头 + 目录锚点的 md（pandoc / 笔记软件 / 静态站点都能用） |
+| **补齐缺章** | 只重抓缺失/空掉的那几章，按顺序插回正确位置（老正文不动） |
 | 打开保存目录 | 直接打开保存文件夹 |
 | 设置 | 并发线程数、请求间隔、失败自动重试轮数（存成 `settings.ini`，也可手改） |
+| `站点配置.ini` | 每个站点单独的并发/间隔/超时/重试/UA/输出编码（**只含连接参数，不含提取规则**） |
 | 设置核心 | 指定第三方番茄下载器的 exe（可选，见下）—— 只在「番茄小说」站点下出现 |
 
 保存结构与缓存：
@@ -127,7 +130,7 @@ build.bat
 | `_selftest.exe` | 命令行自测：`_selftest.exe dl /69_69707 6`、`biquga`、`fanqie`、`write` |
 | `_edgetest.exe` | 边界测试（含离屏真下载：把窗口移到屏幕外，跑一遍和界面完全相同的下载路径） |
 | `_layoutprobe.exe` | 界面布局体检：越界/重叠逐条报出来，`--shots` 还能出截图 |
-| `_offlinetests.exe` | **273 项离线单测，不联网**（CI 跑的就是它） |
+| `_offlinetests.exe` | **484 项离线单测，不联网**（CI 跑的就是它） |
 
 `build.bat` 第一步会跑 `build\fix-encoding.ps1`：自动把源码补成 UTF-8 带 BOM，
 并拒绝任何含中文的 `.bat`（这个坑踩过三次，见第六节）。
@@ -166,7 +169,7 @@ src/                 界面与入口
 tests/               自测：OfflineTests.cs（离线单测）、EdgeTest.cs、TestMain.cs
 tools/               开发辅助：QuickDownload.cs（批量下载）、DiagMobile.cs（诊断）
 build/               csproj（CI 用）、app.manifest、fix-encoding.ps1（编码守护）
-docs/                详细文档：[更新与 EPUB](docs/更新与EPUB.md)、[架构](docs/架构.md)、[站点坑](docs/站点坑.md)、[同类工具调研](docs/同类工具调研.md)、[界面布局](docs/界面布局.md)、
+docs/                详细文档：[站点参数与补齐](docs/站点参数与补齐.md)、[更新与 EPUB](docs/更新与EPUB.md)、[架构](docs/架构.md)、[站点坑](docs/站点坑.md)、[同类工具调研](docs/同类工具调研.md)、[界面布局](docs/界面布局.md)、
                      [下载与网络问题](docs/下载与网络问题.md)、[GitHub 准备清单](docs/GITHUB准备清单.md)
 ```
 

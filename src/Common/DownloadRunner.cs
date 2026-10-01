@@ -40,7 +40,25 @@ namespace TomatoBiquga
         private StringBuilder _pending = new StringBuilder();
         private bool _headerWritten;
         private long _appendedBytes;    // 本次追加了多少字节（更新模式要用它算累计正文长度）
+        /// <summary>写表头用的编码（GBK 时不能带 BOM，否则老阅读器会把 BOM 当正文）</summary>
+        private Encoding HeaderEncoding()
+        {
+            if (OutputEncoding != null && OutputEncoding.CodePage != 65001)
+                return Encoding.GetEncoding(OutputEncoding.CodePage);   // 不带 BOM
+            return new UTF8Encoding(true);
+        }
+
+        /// <summary>追加内容时的编码：UF8 不带 BOM（文件头已经写过了），GBK 直接用 GBK</summary>
+        private Encoding AppendEncoding()
+        {
+            if (OutputEncoding != null && OutputEncoding.CodePage != 65001) return OutputEncoding;
+            return new UTF8Encoding(false);
+        }
+
         private long _baseBodyBytes;    // 更新模式下文件的原始大小
+        private Dictionary<string, ChapterSpan> _existing = new Dictionary<string, ChapterSpan>();
+        private bool _replaceMissing;    // 是否把新章节插到文件里的正确位置（有锚点时为 true）
+        private int _inserted;           // 本次实际插入到文件里的章数
 
         /// <summary>算出一本书的保存目录与 txt 路径</summary>
         public static void ResolvePaths(string rootDir, string bookTitle, out string bookDir, out string txtPath)
@@ -76,12 +94,18 @@ namespace TomatoBiquga
             _appendedBytes = 0;
             int total = Chapters.Count;
 
-            // 更新已有文件：记住它原来的大小（= 旧正文结束位置），新内容一律追加在后面
+            // 更新已有文件：记住它原来的大小，并准备"文件里已经有哪些章"的索引。
+            // 有锚点就**按章节位置插入**（这样缺章补齐、断点续传都能落到正确位置）；
+            // 旧文件没有锚点则退化成"追加到末尾"。
             if (AppendToExistingFile && File.Exists(OutputFile))
             {
                 _baseBodyBytes = new FileInfo(OutputFile).Length;
                 _headerWritten = true;      // 别重写表头
-                Log(string.Format("增量更新模式：已有文件 {0:N0} 字节，新章节将追加在末尾。", _baseBodyBytes));
+                _existing = ChapterIndex.ById(ChapterIndex.Scan(OutputFile));
+                _replaceMissing = _existing.Count > 0;
+                Log(string.Format("增量/补齐模式：已有文件 {0:N0} 字节，识别出 {1} 章{2}。",
+                    _baseBodyBytes, _existing.Count,
+                    _replaceMissing ? "（新章节会插入到正确位置）" : "（旧格式无锚点，只能追加到末尾）"));
             }
             else if (AppendToExistingFile)
             {
@@ -146,7 +170,11 @@ namespace TomatoBiquga
             {
                 // 增量更新：不能整块重写表头（会顶掉旧正文），改成"原位替换统计那一行"，
                 // 并把进度标记（累计章数 + 指纹）写进去，供下次更新判断"哪些是新的"。
-                int cumulative = (CumulativeOkCount >= 0 ? CumulativeOkCount : 0) + Ok;
+                // 统计要反映"文件里实际有多少章有正文"，而不是"本次下了几章"：
+                //   · 断点续传：原进度 + 本次成功
+                //   · 缺章补齐：文件里原本的章数 + 本次补上的（累计不变多，但进度标记要更新）
+                int cumulative = CountChaptersWithBody(OutputFile);
+                if (cumulative <= 0) cumulative = (CumulativeOkCount >= 0 ? CumulativeOkCount : 0) + Ok;
                 int bodyBytes = (int)Math.Min(int.MaxValue, _baseBodyBytes + _appendedBytes);
                 if (InjectHeaderStatistics(OutputFile, Book, cumulative, Skipped, Failed, Chapters, bodyBytes))
                     Log(string.Format("表头统计已更新：累计 {0} 章（本次新增 {1}，跳过 {2}，失败 {3}）",
@@ -166,6 +194,82 @@ namespace TomatoBiquga
             if (FromCacheCount > 0)
                 Log(string.Format("其中 {0}/{1} 章直接复用了目录遍历时已抓到的正文（未重复请求站点）", FromCacheCount, Ok));
             Log(string.Format("本次下载：成功 {0} 章，跳过 {1} 章，失败 {2} 章", Ok, Skipped, Failed));
+        }
+
+        /// <summary>文件里"有正文"的章节数（统计和进度标记用；没有锚点时返回 0）</summary>
+        public static int CountChaptersWithBody(string path)
+        {
+            try
+            {
+                int n = 0;
+                foreach (var s in ChapterIndex.Scan(path)) if (s.HasBody) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// 缺章补齐 / 章节级续传的核心：找出文件里**缺失或空掉的章节**，
+        /// 只重新抓这些章，并按目录顺序插回正确位置（不是追加到末尾）。
+        ///
+        /// 两个功能共用这一份实现，区别只是调用方的意图：
+        ///   · 断点续传：上次中断，文件里后面还缺一大段 → 缺章列表就是"剩下的"
+        ///   · 缺章补齐：整本已下完，中间有站点空内容 → 缺章列表就是中间那几个洞
+        /// </summary>
+        public static void FillMissing(DownloadRunner runner, string filePath, Action<string> log)
+        {
+            if (runner == null || string.IsNullOrEmpty(filePath)) return;
+            if (log == null) log = delegate { };
+
+            if (!File.Exists(filePath)) { log("文件不存在，没法补齐：" + filePath); return; }
+
+            var spans = ChapterIndex.Scan(filePath);
+            if (spans.Count == 0)
+            {
+                log("这个文件没有章节锚点（v1.0.4 之前下载的），没法定位到具体某一章；");
+                log("请点「下载全部章节」重新下载一本（会写成带锚点的新格式）。");
+                return;
+            }
+
+            var have = new Dictionary<string, ChapterSpan>();
+            foreach (var s in spans)
+            {
+                // 只有标题没有正文的章也算"缺"，需要重抓
+                if (!string.IsNullOrEmpty(s.Id) && s.HasBody && !have.ContainsKey(s.Id)) have[s.Id] = s;
+            }
+
+            var missing = new List<ChapterInfo>();
+            foreach (var c in runner.Book.Chapters)
+            {
+                if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
+                if (!have.ContainsKey(c.Id)) missing.Add(c);
+            }
+
+            if (missing.Count == 0)
+            {
+                log(string.Format("检查完毕：文件里 {0} 章都有正文，没有需要补齐的。", have.Count));
+                return;
+            }
+
+            log(string.Format("检查完毕：文件里 {0} 章完整，缺 {1} 章；开始只抓这 {2} 章（已有的不动）。",
+                have.Count, missing.Count, missing.Count));
+
+            runner.Chapters = missing;
+            runner.AppendToExistingFile = true;
+            runner.RetryPasses = 0;                  // 补齐只跑一遍，失败的下次再来（避免长时间卡住）
+            // 保存根目录从文件路径反推（文件一定是「根目录\书名\书名.txt」）：
+            // 这样调用方忘了设 RootDir 也不会崩（离线单测就踩过这个）
+            if (string.IsNullOrEmpty(runner.RootDir))
+            {
+                var bookDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
+                var rootDir = (bookDir == null) ? null : Path.GetDirectoryName(bookDir);
+                runner.RootDir = string.IsNullOrEmpty(rootDir) ? bookDir : rootDir;
+            }
+            runner.Run();
+
+            log(string.Format("补齐结束：新补上 {0} 章，插入位置已按目录顺序排好。", runner.Ok));
+            if (runner.Failed > 0)
+                log(string.Format("仍有 {0} 章抓不到（多为站点侧空内容），下次可以再点一次补齐。", runner.Failed));
         }
 
         /// <summary>失败原因按“这一轮”记账（重试成功后要把上一轮的原因清掉）</summary>
@@ -202,9 +306,19 @@ namespace TomatoBiquga
                 {
                     Ok++;
                     c.Text = text;
-                    _pending.Append("\n\n").Append(c.Title).Append('\n')
-                        .Append(new string('-', Math.Min(24, Math.Max(6, c.Title.Length)))).Append("\n\n")
-                        .Append(TextCleaner.CleanBody(text)).Append('\n');
+                    // 章节块统一由 ChapterIndex 生成：里面会先写一行锚点 <!--c:id-->，
+                    // 「缺章补齐」和「章节级续传」靠它定位到具体某一章（见 ChapterIndex.cs）
+                    var block = ChapterIndex.BuildChapterBlock(c.Id, c.Title, text);
+                    if (_replaceMissing)
+                    {
+                        // 插入模式：直接落到文件里的正确位置（不是简单追加）
+                        if (ChapterIndex.InsertChapter(OutputFile, Book, c, text)) _inserted++;
+                        else { _pending.Append(block); Log("（插入失败，退化为追加）" + c.Title); }
+                    }
+                    else
+                    {
+                        _pending.Append(block);
+                    }
                     if (isRetry && Failed > 0) Failed--;                 // 重试成功：把上一轮的失败计数还回去
                     FailReasons.Remove(c.Id);
                     FailedChapters.Remove(c);
@@ -327,6 +441,9 @@ namespace TomatoBiquga
         /// 这种模式下不重写表头（否则会把已有正文顶掉），只 append 新章节，
         /// 收尾再用 InjectHeaderStatistics 原位更新统计。
         /// </summary>
+        /// <summary>输出文件编码（站点配置里可设为 gbk；默认 utf-8 带 BOM）</summary>
+        public Encoding OutputEncoding = new UTF8Encoding(true);
+
         public bool AppendToExistingFile;
 
         /// <summary>本次是"更新已有文件"：表头统计里显示累计章数而不是本次新增数</summary>
@@ -404,14 +521,14 @@ namespace TomatoBiquga
             if (_pending.Length == 0 && (_headerWritten || AppendToExistingFile)) return;
             if (!_headerWritten && !AppendToExistingFile)
             {
-                using (var w = new StreamWriter(OutputFile, false, new UTF8Encoding(true)))
+                using (var w = new StreamWriter(OutputFile, false, HeaderEncoding()))
                     w.Write(BuildHeaderZone());
                 _headerWritten = true;
             }
             if (_pending.Length > 0)
             {
                 var chunk = _pending.ToString();
-                using (var w = new StreamWriter(OutputFile, true, new UTF8Encoding(false)))
+                using (var w = new StreamWriter(OutputFile, true, AppendEncoding()))
                     w.Write(chunk);
                 // 记下追加的字节数（更新模式算累计正文长度用；UTF-8 下等于字节数）
                 _appendedBytes += Encoding.UTF8.GetByteCount(chunk);
@@ -515,7 +632,7 @@ namespace TomatoBiquga
         {
             // 整文件重写路径（自测用）：同样带上预留表头区，保证后续 FixHeaderNow 行为一致
             var tmp = OutputFile + ".tmp";
-            using (var w = new StreamWriter(tmp, false, new UTF8Encoding(true)))
+            using (var w = new StreamWriter(tmp, false, HeaderEncoding()))
             {
                 w.Write(BuildHeaderZone());
                 w.Write(body);
@@ -562,7 +679,7 @@ namespace TomatoBiquga
             }
             bool hasZone = zone >= cutBytes + 256;                // 标记可信（且确实比表头区大）
 
-            var headerBytes = Encoding.UTF8.GetBytes(BuildHeader());
+            var headerBytes = HeaderEncoding().GetBytes(BuildHeader());
             if (!hasZone && headerBytes.Length > cutBytes)
             {
                 Log("注意：这是旧格式文件（表头区没有预留空间），新统计比原来长，"

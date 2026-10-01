@@ -35,13 +35,17 @@ namespace TomatoBiquga
         private SplitContainer _split;
         private CheckBox chkOffline;
         private AppSettings _settings;     // 并发/间隔/重试，来自 exe 同目录的 settings.ini
+        private SiteProfile _profile;      // 当前站点的连接参数（站点配置.ini，可手改）
         private string _lastOfficialFile;   // 官方工具最近一次的输出文件（用于「打开保存目录」）
         private FlowLayoutPanel _rowFanqie; // 番茄专用的第三行（平时隐藏）
         private FlowLayoutPanel _row1, _row2; // 顶部前两行（用来算顶部面板该多高）
         private Panel _kwHost;              // 关键词输入框的容器（宽度随窗口伸缩）
-        private FlowLayoutPanel _chapFlow;  // 章节栏左侧按钮区
+        private FlowLayoutPanel _chapFlow;   // 章节栏第一行按钮
+        private FlowLayoutPanel _chapFlow2;  // 章节栏第二行按钮（导出类）
         private Button btnUpdate;           // 更新已下载的书（只补新章节）
         private Button btnExportEpub;       // 导出 EPUB
+        private Button btnExportMd;         // 导出 Markdown
+        private Button btnFillMissing;      // 补齐缺章
 
         /// <summary>把分隔条位置夹到合法范围内（窗口还很小的时候尤其重要）</summary>
         private void ClampSplitter()
@@ -73,7 +77,7 @@ namespace TomatoBiquga
         public MainForm()
         {
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0.4（免安装单文件版）";
+            Text = "小说下载器 v1.0.5（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
@@ -277,35 +281,52 @@ namespace TomatoBiquga
             // 章节栏：左边按钮按内容宽度排（FlowLayoutPanel 不会互相压），
             // 右边状态文字用 Fill 吃掉剩余宽度 —— 老代码把状态文字硬编码在 x=606，
             // x=700 的按钮正好压上去，这就是用户截图里"看不清"的那处。
-            var chapBar = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(0, 3, 0, 3) };
+            var chapBar = new Panel { Dock = DockStyle.Top, Height = 68, Padding = new Padding(0, 3, 0, 3) };
+            // 按钮一行放不下了（11 个），拆成两行。
+            // 每行宽度都按"文字实测宽 + 内边距"预先算过：两行各约 640px，
+            // 而最小窗口（820px）的可用宽是 780px，留有余量。
             _chapFlow = new FlowLayoutPanel
             {
-                Dock = DockStyle.Left,
-                Width = 570,          // 初值而已，实际宽度由 LayoutInlineTweaks 按内容算
+                Dock = DockStyle.Top,
+                Height = 32,
                 WrapContents = false,
                 FlowDirection = FlowDirection.LeftToRight,
-                Padding = new Padding(0),
-                AutoSize = true,      // 按钮多了自动变宽，不会被写死的宽度卡住（v1.0.3 就栽在这）
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(0, 2, 0, 0),
+            };
+            _chapFlow2 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 32,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(0, 2, 0, 0),
             };
             btnSelectAll = MakeButton("全选", 44, (s, e) => SetAllChecks(true), 2);
             btnSelectNone = MakeButton("全不选", 56, (s, e) => SetAllChecks(false), 2);
             btnInvert = MakeButton("反选", 44, (s, e) => InvertChecks(), 6);
-            btnDownloadAll = MakeButton("下载全部", 68, (s, e) => DoDownloadAll(), 2);
             btnDownload = MakeButton("下载选中", 68, (s, e) => DoDownload(), 2);
-            btnCancel = MakeButton("取消", 44, (s, e) => { _cancel = true; Log("已请求取消，正在收尾…"); }, 6);
-            btnCancel.Enabled = false;
-            btnOpenFolder = MakeButton("打开目录", 68, (s, e) => OpenFolder());
-            new ToolTip().SetToolTip(btnOpenFolder, "打开保存这本书的文件夹");
+            btnDownloadAll = MakeButton("下载全部", 68, (s, e) => DoDownloadAll(), 2);
             btnUpdate = MakeButton("更新新章节", 80, (s, e) => DoUpdateExisting(), 2);
             new ToolTip().SetToolTip(btnUpdate,
-                "检查这本书有没有新章节，只把新的补上去（追加到已有 txt 末尾，不动旧内容）。\n" +
-                "靠文件表头里的进度标记判断哪些章是新的；旧版本下载的文件没有标记，\n" +
-                "会提示你重新下载整本。");
-            btnExportEpub = MakeButton("导出 EPUB", 72, (s, e) => DoExportEpub(), 6);
+                "检查这本书有没有新章节，只把新的补上去（不动旧内容）。\n" +
+                "有章节锚点的文件会把新章节插到正确位置；旧文件退化为追加到末尾。");
+            btnFillMissing = MakeButton("补齐缺章", 68, (s, e) => DoFillMissing(), 2);
+            new ToolTip().SetToolTip(btnFillMissing,
+                "检查这个文件里缺了哪些章（站点侧空内容、或上次中断），只重新抓那几章，\n" +
+                "按章节顺序插回正确位置 —— 已有正文一个字都不会动。\n" +
+                "需要文件带章节锚点（v1.0.5 之后下载的）；旧文件会提示重新下载。");
+            btnCancel = MakeButton("取消", 44, (s, e) => { _cancel = true; Log("已请求取消，正在收尾…"); }, 0);
+            btnCancel.Enabled = false;
+            btnExportEpub = MakeButton("导出 EPUB", 72, (s, e) => DoExportEpub(), 2);
             new ToolTip().SetToolTip(btnExportEpub,
                 "把这本书已下载的正文导出成 EPUB（手机阅读器、Kindle 都能直接打开）。\n" +
                 "只导出已经下载到本地的章节，不会联网。");
+            btnExportMd = MakeButton("导出 Markdown", 96, (s, e) => DoExportMarkdown(), 2);
+            new ToolTip().SetToolTip(btnExportMd,
+                "把已下载的正文导出成 Markdown（带 YAML 头信息和目录锚点）：\n" +
+                "方便用 pandoc 转 EPUB/PDF，或者丢进笔记软件、静态站点生成器。");
+            btnOpenFolder = MakeButton("打开目录", 68, (s, e) => OpenFolder());
+            new ToolTip().SetToolTip(btnOpenFolder, "打开保存这本书的文件夹");
             lblSel = new Label
             {
                 Text = "（还没载入目录）",
@@ -316,9 +337,12 @@ namespace TomatoBiquga
                 Padding = new Padding(6, 0, 0, 0),
                 AutoEllipsis = true,      // 窗口太窄时显示"…"，不会盖住按钮
             };
-            _chapFlow.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownloadAll, btnDownload, btnCancel, btnUpdate, btnExportEpub, btnOpenFolder });
-            chapBar.Controls.Add(lblSel);
+            _chapFlow.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownload, btnDownloadAll, btnUpdate, btnFillMissing, btnCancel });
+            _chapFlow2.Controls.AddRange(new Control[] { btnExportEpub, btnExportMd, btnOpenFolder });
+            // Dock=Top 的添加顺序 = 从上往下的顺序
+            chapBar.Controls.Add(_chapFlow2);
             chapBar.Controls.Add(_chapFlow);
+            chapBar.Controls.Add(lblSel);
             split.Panel2.Controls.Add(lstChapters);
             split.Panel2.Controls.Add(chapBar);
 
@@ -345,6 +369,13 @@ namespace TomatoBiquga
             Log("工具已就绪。");
             Log("取数后端：" + (Http.CurlAvailable ? "系统自带 curl（" + Http.CurlPath + "）" : "内置 .NET 请求（未找到 curl.exe）"));
             Log("当前设置：" + _settings + "（改这些点上面的「设置」按钮，或直接编辑 " + AppSettings.FileName + "）");
+            if (!System.IO.File.Exists(SiteProfileStore.DefaultPath))
+            {
+                SiteProfileStore.SaveSample(SiteProfileStore.DefaultPath, SiteProfileStore.Defaults());
+                Log("已生成站点参数样例：" + SiteProfileStore.DefaultPath + "（只放并发/间隔/超时/重试/UA/编码，可手改）");
+            }
+            if (!string.IsNullOrEmpty(SiteProfileStore.LastError)) Log("站点配置提醒：" + SiteProfileStore.LastError);
+            Log("站点参数：" + (_profile != null ? _profile.ToString() : "（默认）"));
             Log("· 笔趣阁：直接输入中文书名搜索（例如：沧元图），双击结果载入目录后勾选章节下载。");
             Log("· 番茄小说：番茄没有公开的中文搜索接口，请点「浏览器搜索」去官网找到书，");
             Log("  再把书籍链接（.../page/数字）或 book_id 粘贴到输入框即可自动载入目录。");
@@ -441,6 +472,8 @@ namespace TomatoBiquga
             _site = fanqie ? (ISite)new FanqieSite()
                  : mobile ? (ISite)new BiqugaMobileSite()
                  : (ISite)new BiqugaSite();
+            _profile = SiteProfileStore.Get(SiteKeyOf(_site));
+            ApplySettings();
             if (btnWebSearch != null) btnWebSearch.Enabled = fanqie;
             if (btnOfficial != null) btnOfficial.Enabled = fanqie;
             // 番茄专用的那一行整行出现/隐藏（隐藏时不留空行，顶部面板自己收高度）
@@ -629,12 +662,40 @@ namespace TomatoBiquga
         private void ApplySettings()
         {
             Http.Configure(_settings.MinDelayMs, _settings.MaxDelayMs);
+
+            // 站点级参数（站点配置.ini）优先于全局设置：联网参数（并发/间隔/超时/重试/UA）按站点走，
+            // 这样"某个站点被限速要调慢"不用动全局。文件不存在时用内置默认值。
+            var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(_site));
+            SiteProfileStore.Apply(prof);
+
             var bm = _site as BiqugaMobileSite;
             if (bm != null)
                 bm.Workers = chkOffline != null && chkOffline.Checked
                     ? _settings.BiqugaOfflineWorkers : _settings.BiqugaOnlineWorkers;
             var bq = _site as BiqugaSite;
             if (bq != null) bq.CrawlWorkers = _settings.BiqugaPcWorkers;
+            // 站点配置里明确写了 workers 就用它（用户手改的优先级最高）
+            if (prof != null && prof.Workers > 0)
+            {
+                if (bm != null) bm.Workers = prof.Workers;
+                if (bq != null) bq.CrawlWorkers = prof.Workers;
+            }
+        }
+
+        /// <summary>把当前站点映射到站点配置里的 key</summary>
+        private static string SiteKeyOf(ISite site)
+        {
+            if (site == null) return "biquga-m";
+            if (site is FanqieSite) return "fanqie";
+            if (site is BiqugaMobileSite) return "biquga-m";
+            return "biquga";
+        }
+
+        /// <summary>取当前站点该用的输出编码（站点配置里可指定 gbk）</summary>
+        internal System.Text.Encoding CurrentFileEncoding()
+        {
+            var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(_site));
+            return prof == null ? new System.Text.UTF8Encoding(true) : prof.FileEncoding();
         }
 
         /// <summary>
@@ -1175,6 +1236,7 @@ namespace TomatoBiquga
                 RootDir = root,
                 Log = Log,
                 RetryPasses = _settings.RetryPasses,
+                OutputEncoding = CurrentFileEncoding(),
                 IsCanceled = () => _cancel,
                 OnProgress = (done, total) =>
                 {
@@ -1431,6 +1493,122 @@ namespace TomatoBiquga
         /// 用书里已有的章节标题做锚点，比"猜分隔符"可靠；认不出来就返回空列表
         /// （宁可少导出，也不要导出一堆错乱内容）。
         /// </summary>
+        /// <summary>
+        /// 「补齐缺章」：检查文件里缺哪些章（站点空内容 / 上次中断），只重抓那几章，
+        /// 按章节顺序插回正确位置。已有正文一个字都不动。
+        /// </summary>
+        private void DoFillMissing()
+        {
+            if (_busy) { BusyNotice(Text); return; }
+            if (_currentBook == null) { MessageBox.Show("请先载入一本书的目录"); return; }
+
+            var book = _currentBook;
+            string root = txtOutput.Text.Trim();
+            if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+            string bookDir, txtPath;
+            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+
+            if (!File.Exists(txtPath))
+            {
+                MessageBox.Show("这本书还没有下载过（找不到文件）：\n" + txtPath +
+                    "\n\n请先点「下载全部」。", "补齐缺章", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (!ChapterIndex.HasAnchors(txtPath))
+            {
+                MessageBox.Show(
+                    "这个文件是 v1.0.4 之前下载的，正文里没有章节锚点，没法定位到具体某一章。\n\n" +
+                    "（没有锚点就只能靠标题字符串猜位置，猜错会把正文插到错误的地方 —— 所以宁可不做。）\n\n" +
+                    "想用补齐功能：请点「下载全部」重新下载一本（会写成带锚点的新格式）。",
+                    "补齐缺章", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var site = _site;
+            RunBackground("检查缺章…", () =>
+            {
+                var runner = new DownloadRunner
+                {
+                    Site = site,
+                    Book = book,
+                    Chapters = new List<ChapterInfo>(),
+                    RootDir = root,
+                    Log = Log,
+                    OutputEncoding = CurrentFileEncoding(),
+                    OnProgress = (n, total) => UiInvoke(() =>
+                    {
+                        progress.Minimum = 0;
+                        progress.Maximum = Math.Max(1, total);
+                        progress.Value = Math.Min(n, total);
+                        lblStatus.Text = string.Format("补齐缺章 {0}/{1}…", n, total);
+                    }),
+                };
+                DownloadRunner.FillMissing(runner, txtPath, Log);
+                UiInvoke(() => lblStatus.Text = string.Format("补齐结束：补上 {0} 章", runner.Ok));
+                if (runner.Ok > 0) ReportDownloadFinished(runner);
+                else if (!SuppressDialogs)
+                    MessageBox.Show("检查完毕：这个文件没有缺章，不需要补。", "补齐缺章",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+
+        /// <summary>「导出 Markdown」：把已下载的正文导出成 md（带 YAML 头 + 目录锚点）。</summary>
+        private void DoExportMarkdown()
+        {
+            if (_busy) { BusyNotice(Text); return; }
+            if (_currentBook == null) { MessageBox.Show("请先载入一本书的目录"); return; }
+
+            var book = _currentBook;
+            string root = txtOutput.Text.Trim();
+            if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+            string bookDir, txtPath;
+            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+
+            var chapters = new List<ChapterInfo>();
+            foreach (var c in book.Chapters)
+            {
+                if (c == null || c.IsVolume) continue;
+                if (!string.IsNullOrEmpty(c.Text)) chapters.Add(c);
+            }
+            if (chapters.Count == 0)
+            {
+                if (!File.Exists(txtPath))
+                {
+                    MessageBox.Show("这本书还没有下载过，也没有可导出的正文。\n\n请先点「下载全部」。",
+                        "导出 Markdown", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                chapters = ParseTxtIntoChapters(txtPath, book);
+                Log(string.Format("从 txt 解析出 {0} 章正文用于导出。", chapters.Count));
+            }
+            if (chapters.Count == 0)
+            {
+                MessageBox.Show("没能从文件里解析出正文（文件可能是空的）。", "导出 Markdown",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var mdPath = Path.Combine(bookDir, Http.SafeFileName(book.Title) + ".md");
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                MarkdownWriter.Write(mdPath, book, chapters, true);
+                var size = new FileInfo(mdPath).Length;
+                Log(string.Format("Markdown 已生成：{0}（{1:N0} 字节，{2} 章）", mdPath, size, chapters.Count));
+                if (!SuppressDialogs)
+                    MessageBox.Show(string.Format("Markdown 导出完成！\n\n章节数：{0}\n文件大小：{1:N0} 字节\n\n文件位置：\n{2}",
+                        chapters.Count, size, mdPath), "导出 Markdown",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Log("导出 Markdown 失败：" + ex.Message);
+                if (!SuppressDialogs)
+                    MessageBox.Show("导出失败：" + ex.Message, "导出 Markdown",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally { Cursor = Cursors.Default; }
+        }
         internal static List<ChapterInfo> ParseTxtIntoChapters(string txtPath, BookInfo book)
         {
             var hits = new List<ChapterInfo>();

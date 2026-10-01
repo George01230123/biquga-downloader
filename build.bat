@@ -33,7 +33,7 @@ set FLAGS=/nologo /platform:anycpu /optimize+ /codepage:65001 /nowarn:1591,0618
 rem System.IO.Compression[.FileSystem]: needed by the EPUB export (hand-written zip,
 rem zero third-party dependencies).
 set REFS=/r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll
-set COMMON=src\Common\Models.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs
+set COMMON=src\Common\Models.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs src\Common\ChapterIndex.cs src\Common\SiteProfile.cs src\Common\MarkdownWriter.cs
 set SITES=src\Sites\BiqugaSite.cs src\Sites\BiqugaMobileSite.cs src\Sites\FanqieSite.cs src\Sites\TomatoCore.cs
 
 echo [2/6] Building main program (GUI)...
