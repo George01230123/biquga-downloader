@@ -39,6 +39,8 @@ namespace TomatoBiquga
         // 增量写盘用：攒够一批就 append，避免每次都重写整个文件
         private StringBuilder _pending = new StringBuilder();
         private bool _headerWritten;
+        private long _appendedBytes;    // 本次追加了多少字节（更新模式要用它算累计正文长度）
+        private long _baseBodyBytes;    // 更新模式下文件的原始大小
 
         /// <summary>算出一本书的保存目录与 txt 路径</summary>
         public static void ResolvePaths(string rootDir, string bookTitle, out string bookDir, out string txtPath)
@@ -71,7 +73,24 @@ namespace TomatoBiquga
             _failedPass.Clear();
             _pending.Length = 0;
             _headerWritten = false;
+            _appendedBytes = 0;
             int total = Chapters.Count;
+
+            // 更新已有文件：记住它原来的大小（= 旧正文结束位置），新内容一律追加在后面
+            if (AppendToExistingFile && File.Exists(OutputFile))
+            {
+                _baseBodyBytes = new FileInfo(OutputFile).Length;
+                _headerWritten = true;      // 别重写表头
+                Log(string.Format("增量更新模式：已有文件 {0:N0} 字节，新章节将追加在末尾。", _baseBodyBytes));
+            }
+            else if (AppendToExistingFile)
+            {
+                // 调用方要求"追加"，但文件其实不存在（比如用户在下载过程中删了文件，
+                // 或者目录缓存说是旧的、文件却没了）。这时按普通下载处理：
+                // 正常写表头，收尾也走 FixHeaderNow —— 否则会生成一个没有表头的文件。
+                AppendToExistingFile = false;
+                Log("注意：文件不存在，本次按普通下载处理（会重新写表头）。");
+            }
 
             for (int i = 0; i < total; i++)
             {
@@ -123,7 +142,22 @@ namespace TomatoBiquga
 
             // 收尾：更新表头统计，并把“缺了哪几章”落成独立报告
             FlushIncremental();
-            FixHeaderNow();
+            if (AppendToExistingFile)
+            {
+                // 增量更新：不能整块重写表头（会顶掉旧正文），改成"原位替换统计那一行"，
+                // 并把进度标记（累计章数 + 指纹）写进去，供下次更新判断"哪些是新的"。
+                int cumulative = (CumulativeOkCount >= 0 ? CumulativeOkCount : 0) + Ok;
+                int bodyBytes = (int)Math.Min(int.MaxValue, _baseBodyBytes + _appendedBytes);
+                if (InjectHeaderStatistics(OutputFile, Book, cumulative, Skipped, Failed, Chapters, bodyBytes))
+                    Log(string.Format("表头统计已更新：累计 {0} 章（本次新增 {1}，跳过 {2}，失败 {3}）",
+                        cumulative, Ok, Skipped, Failed));
+                else
+                    Log("注意：这个文件的表头没有预留区（旧版本下载的），累计统计没写进去；正文不受影响。");
+            }
+            else
+            {
+                FixHeaderNow();
+            }
             WriteMissingReport();
             if (Failed > 0 || Skipped > 0) LogMissingSummary();
 
@@ -281,6 +315,68 @@ namespace TomatoBiquga
         /// <summary>表头区标记：有了它，收尾时才知道这个文件预留了多少字节可以原地改写</summary>
         internal const string HeaderZoneMarker = "#header-zone:";
 
+        /// <summary>
+        /// 进度标记（写进表头）：记录"已经成功写入正文的章节数"和这些章节 id 的指纹。
+        /// 增量更新靠它判断"哪些章是新的" —— 不用去解析文件名，也不怕标题被站点改过。
+        /// 格式故意用 key:value，方便机器读，同时人类看也不刺眼。
+        /// </summary>
+        internal const string ProgressOkMarker = "#progress-ok:";
+
+        /// <summary>
+        /// 是否往已有文件**追加**（增量更新模式）。
+        /// 这种模式下不重写表头（否则会把已有正文顶掉），只 append 新章节，
+        /// 收尾再用 InjectHeaderStatistics 原位更新统计。
+        /// </summary>
+        public bool AppendToExistingFile;
+
+        /// <summary>本次是"更新已有文件"：表头统计里显示累计章数而不是本次新增数</summary>
+        public int CumulativeOkCount = -1;
+
+        /// <summary>章节 id 列表的短指纹（MD5 前 12 位十六进制）</summary>
+        internal static string Fingerprint(string s)
+        {
+            using (var md5 = System.Security.Cryptography.MD5.Create())
+            {
+                var h = md5.ComputeHash(Encoding.UTF8.GetBytes(s ?? ""));
+                var sb = new StringBuilder(12);
+                for (int i = 0; i < 6; i++) sb.Append(h[i].ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>
+        /// 从已有文件里读出进度：txt 里已经有多少章、指纹是什么、正文有多少字符。
+        /// 读不到（旧版本文件、手工拼的文件）就返回 -1，调用方走"整本重新下载"。
+        /// </summary>
+        public static bool TryReadProgress(string path, out int okCount, out string fingerprint, out int bodyChars)
+        {
+            okCount = -1; fingerprint = null; bodyChars = -1;
+            try
+            {
+                if (!File.Exists(path)) return false;
+                var bytes = File.ReadAllBytes(path);
+                int bom = (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) ? 3 : 0;
+                int scan = Math.Min(16384, bytes.Length - bom);
+                if (scan <= 0) return false;
+                var text = Encoding.ASCII.GetString(bytes, bom, scan);
+                int i = text.IndexOf(ProgressOkMarker, StringComparison.Ordinal);
+                if (i < 0) return false;
+                int end = text.IndexOf('\n', i);
+                var payload = text.Substring(i + ProgressOkMarker.Length,
+                    (end < 0 ? text.Length : end) - i - ProgressOkMarker.Length).Trim();
+                var parts = payload.Split(':');
+                if (parts.Length < 2) return false;
+                int ok;
+                if (!int.TryParse(parts[0].Trim(), out ok) || ok < 0) return false;
+                okCount = ok;
+                fingerprint = parts[1].Trim();
+                int bc;
+                if (parts.Length >= 3 && int.TryParse(parts[2].Trim(), out bc)) bodyChars = bc;
+                return true;
+            }
+            catch { return false; }
+        }
+
         /// <summary>表头 + 补白 + 表头区标记（正文从这之后才开始，所以正文永远不会被表头挤到）</summary>
         internal string BuildHeaderZone()
         {
@@ -288,7 +384,10 @@ namespace TomatoBiquga
             int headBytes = Encoding.UTF8.GetByteCount(head);
             int pad = ReservedHeaderBytes - headBytes;
             if (pad < 0) pad = 0;
-            return head + new string('\n', pad) + HeaderZoneMarker + ReservedHeaderBytes + "\n";
+            // 末尾那个 '\n' 很关键：让 #header-zone 标记**自成一行**。
+            // 否则标记紧贴在补白后面，增量更新时"往前找行首"会命中补白里的换行，
+            // 把「下载时间 / 46 个等号」两行误当成补白填掉（真实 bug，等号行会消失）。
+            return head + new string('\n', pad) + "\n" + HeaderZoneMarker + ReservedHeaderBytes + "\n";
         }
 
         /// <summary>
@@ -296,11 +395,14 @@ namespace TomatoBiquga
         /// 预留表头区是为了让收尾时的“原位改表头”永远有地方写：
         /// 否则统计行一长（例如多出“缺失 N 章”那一行），新表头占的字节比旧的多，
         /// 就会盖掉正文开头几个字 —— 这是离线单测真实抓出来的 bug。
+        ///
+        /// AppendToExistingFile=true（更新已有文件）时跳过写表头：表头已经在那儿了，
+        /// 重写一次会从文件开头覆盖，把已有正文顶掉。收尾用 InjectHeaderStatistics 更新统计。
         /// </summary>
         private void FlushIncremental()
         {
-            if (_pending.Length == 0 && _headerWritten) return;
-            if (!_headerWritten)
+            if (_pending.Length == 0 && (_headerWritten || AppendToExistingFile)) return;
+            if (!_headerWritten && !AppendToExistingFile)
             {
                 using (var w = new StreamWriter(OutputFile, false, new UTF8Encoding(true)))
                     w.Write(BuildHeaderZone());
@@ -308,10 +410,105 @@ namespace TomatoBiquga
             }
             if (_pending.Length > 0)
             {
+                var chunk = _pending.ToString();
                 using (var w = new StreamWriter(OutputFile, true, new UTF8Encoding(false)))
-                    w.Write(_pending.ToString());
+                    w.Write(chunk);
+                // 记下追加的字节数（更新模式算累计正文长度用；UTF-8 下等于字节数）
+                _appendedBytes += Encoding.UTF8.GetByteCount(chunk);
                 _pending.Length = 0;
             }
+        }
+
+        /// <summary>
+        /// 在一段可显示区域里，把「本次下载：成功 …」那一行换成带进度标记的新统计，
+        /// 用换行补齐到原来的长度。文件长度不变 → 不会顶掉后面的正文。
+        ///
+        /// 这是增量更新的收尾步骤：新章节 append 完之后，表头要反映"累计多少章"。
+        /// 判据是 zoneLen（表头区大小，由 #header-zone: 标记给出），信息不全就不改。
+        /// </summary>
+        public static bool InjectHeaderStatistics(string path, BookInfo book, int cumulativeOk, int skipped, int failed,
+            IList<ChapterInfo> chapters, int bodyChars)
+        {
+            // ============================================================
+            //  做法：把「表头起点 → 正文起点」这一整块（表头 + 补白 + 标记行）
+            //  **整个重建**后写回，总字节数严格守恒。
+            //
+            //  为什么重建而不是"只替换统计行"：表头里既有中文（字符≠字节）又有多行，
+            //  只替换一行要做到"覆盖长度精确"很脆 —— 我已经在这上面栽了三次：
+            //    1) 把 ASCII 解码后的字符下标当字节偏移用（覆盖长度算大 2 倍多）；
+            //    2) "往后找行首"命中补白里的换行，把后面几行当补白填掉；
+            //    3) 定长补齐与"放不下就放弃"互相打架，统计永远更新不了。
+            //  重建法只有一个约束：新表头 + 补白 + 标记行 ≤ 原来的表头区字节数，否则整体放弃。
+            // ============================================================
+            try
+            {
+                if (!File.Exists(path)) return false;
+                var bytes = File.ReadAllBytes(path);
+                int bom = (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) ? 3 : 0;
+                int scan = Math.Min(16384, bytes.Length - bom);
+                if (scan <= 0) return false;
+
+                // 表头区总字节数 = 从（BOM 后的）文件开头到 #header-zone 标记那一行的行尾。
+                // 标记行本身的字节数 = 标记 + 数字 + 换行（数字位数会变，所以**不能写死**，要量出来）。
+                int markerAt = IndexOfBytes(bytes, bom, scan, Encoding.UTF8.GetBytes(HeaderZoneMarker));
+                if (markerAt < 0) return false;
+                int markerLineEnd = IndexOfByte(bytes, markerAt, scan - (markerAt - bom), (byte)'\n');
+                if (markerLineEnd < 0) return false;
+                int zoneBytes = markerLineEnd + 1 - bom;         // 要守恒的字节数
+                int markerLineBytes = markerLineEnd + 1 - markerAt;
+
+                var head = BuildHeaderFor(book, chapters, cumulativeOk, skipped, failed);
+                var headBytes = Encoding.UTF8.GetBytes(head);
+                int pad = zoneBytes - headBytes.Length - markerLineBytes;   // 把差额全给补白
+                if (pad < 0) return false;                       // 放不下就整体放弃，绝不越界
+
+                var block = new MemoryStream(zoneBytes);
+                block.Write(headBytes, 0, headBytes.Length);
+                var nl = new byte[Math.Max(0, pad)];
+                for (int i = 0; i < nl.Length; i++) nl[i] = (byte)'\n';
+                block.Write(nl, 0, nl.Length);
+                var tail = Encoding.UTF8.GetBytes(HeaderZoneMarker + ReservedHeaderBytes + "\n");
+                block.Write(tail, 0, tail.Length);
+                if (block.Length != zoneBytes) return false;     // 保险：字节数必须一模一样
+
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+                {
+                    fs.Position = bom;
+                    fs.Write(block.GetBuffer(), 0, (int)block.Length);
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+        /// <summary>在字节数组里从 to 往前找某个字节（用来定位"某一行的行首"）</summary>
+        internal static int IndexOfByteBackward(byte[] haystack, int from, int to, byte value)
+        {
+            if (haystack == null) return -1;
+            int lo = Math.Max(0, from);
+            int hi = Math.Min(haystack.Length - 1, to);
+            for (int i = hi; i >= lo; i--) if (haystack[i] == value) return i;
+            return -1;
+        }
+        internal static int IndexOfByte(byte[] haystack, int from, int len, byte value)
+        {
+            if (haystack == null) return -1;
+            int end = Math.Min(haystack.Length, from + len);
+            for (int i = from; i < end; i++) if (haystack[i] == value) return i;
+            return -1;
+        }
+        /// <summary>在字节数组的 [from, from+len) 区间里找一段字节序列（中文不能用字符下标定位）</summary>
+        internal static int IndexOfBytes(byte[] haystack, int from, int len, byte[] needle)
+        {
+            if (haystack == null || needle == null || needle.Length == 0) return -1;
+            int end = from + len - needle.Length;
+            for (int i = from; i <= end; i++)
+            {
+                bool ok = true;
+                for (int j = 0; j < needle.Length; j++)
+                    if (haystack[i + j] != needle[j]) { ok = false; break; }
+                if (ok) return i;
+            }
+            return -1;
         }
 
         private void WriteWithHeader(string body)
@@ -394,6 +591,17 @@ namespace TomatoBiquga
         }
 
         /// <summary>按指定统计生成表头（测试和正式流程共用）</summary>
+        /// <summary>
+        /// 静态版表头构造（增量更新收尾时用：那时只有一个 DownloadRunner 实例，
+        /// 但重建表头需要按"累计统计"而不是"本次统计"来写，所以单独抽一个能传统计的入口）。
+        /// 与实例版 BuildHeader 共用同一份实现，避免两处写得不一致。
+        /// </summary>
+        internal static string BuildHeaderFor(BookInfo book, IList<ChapterInfo> chapters, int ok, int skipped, int failed)
+        {
+            var r = new DownloadRunner { Book = book };
+            if (chapters != null) foreach (var c in chapters) r.Chapters.Add(c);
+            return r.BuildHeader(ok, skipped, failed);
+        }
         public string BuildHeader(int ok, int skipped, int failed)
         {
             var sb = new StringBuilder();
@@ -406,13 +614,46 @@ namespace TomatoBiquga
                 if (desc.Length > 300) desc = desc.Substring(0, 300) + "…";
                 sb.AppendLine("简介：" + desc);
             }
-            sb.AppendLine(string.Format("本次下载：成功 {0} 章，跳过 {1} 章，失败 {2} 章", ok, skipped, failed));
+            // 统计行里带上进度标记（累计章数 + 章节 id 指纹），供「更新已下载的书」判断哪些是新的
+            sb.AppendLine(BuildStatisticsLine(ok, skipped, failed, Chapters));
             // 缺章时在表头补一句（只加一行、体积可控，正文不会被打乱；明细在“缺失章节.txt”）
             if (skipped + failed > 0)
                 sb.AppendLine(string.Format("缺失 {0} 章（跳过 {1} + 失败 {2}），明细见同名「.缺失章节.txt」",
                     skipped + failed, skipped, failed));
             sb.AppendLine("下载时间：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             sb.AppendLine(new string('=', 46));
+            return sb.ToString();
+        }
+
+
+        /// <summary>
+        /// 统计行文本（含进度标记、补齐到固定字节数）。表头初次生成、收尾更新、增量更新
+        /// 三处都用它，保证格式唯一 —— 否则标记写法一变，老文件就读不出进度了。
+        /// 读取端（TryReadProgress）按"标记 → 行尾"取值，末尾补的空格会被 Trim 掉。
+        /// </summary>
+        internal static string BuildStatisticsLine(int ok, int skipped, int failed, IList<ChapterInfo> chapters)
+        {
+            string fp = Fingerprint(IdsOf(chapters, ok));
+            var line = string.Format("本次下载：成功 {0} 章，跳过 {1} 章，失败 {2} 章  {3}{0}:{4}",
+                ok, skipped, failed, ProgressOkMarker, fp);
+            // 不做定长补齐：表头区里「统计行 + 补白」的整体长度是守恒的，
+            // 收尾注入时会把这段区域重新填满到 #header-zone 标记之前，
+            // 所以统计行长短变化不会让标记行/正文起点漂移（见 InjectHeaderStatistics）。
+            return line;
+        }
+
+        /// <summary>前 n 章的 id 拼起来（进度指纹用）</summary>
+        private static string IdsOf(IList<ChapterInfo> chapters, int n)
+        {
+            if (chapters == null || n <= 0) return "";
+            var sb = new StringBuilder();
+            int end = Math.Min(n, chapters.Count);
+            for (int i = 0; i < end; i++)
+            {
+                var c = chapters[i];
+                if (c == null) continue;
+                sb.Append(c.Id).Append('|');
+            }
             return sb.ToString();
         }
     }

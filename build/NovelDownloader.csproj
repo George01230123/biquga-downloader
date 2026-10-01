@@ -36,6 +36,8 @@
   <ItemGroup>
     <!-- System.Web.Extensions：解析番茄目录接口的 JSON -->
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
 
   <ItemGroup>

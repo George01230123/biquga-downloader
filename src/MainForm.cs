@@ -40,6 +40,8 @@ namespace TomatoBiquga
         private FlowLayoutPanel _row1, _row2; // 顶部前两行（用来算顶部面板该多高）
         private Panel _kwHost;              // 关键词输入框的容器（宽度随窗口伸缩）
         private FlowLayoutPanel _chapFlow;  // 章节栏左侧按钮区
+        private Button btnUpdate;           // 更新已下载的书（只补新章节）
+        private Button btnExportEpub;       // 导出 EPUB
 
         /// <summary>把分隔条位置夹到合法范围内（窗口还很小的时候尤其重要）</summary>
         private void ClampSplitter()
@@ -71,7 +73,7 @@ namespace TomatoBiquga
         public MainForm()
         {
             // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0.3（免安装单文件版）";
+            Text = "小说下载器 v1.0.4（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
@@ -279,19 +281,31 @@ namespace TomatoBiquga
             _chapFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Left,
-                Width = 570,
+                Width = 570,          // 初值而已，实际宽度由 LayoutInlineTweaks 按内容算
                 WrapContents = false,
                 FlowDirection = FlowDirection.LeftToRight,
                 Padding = new Padding(0),
+                AutoSize = true,      // 按钮多了自动变宽，不会被写死的宽度卡住（v1.0.3 就栽在这）
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
             };
             btnSelectAll = MakeButton("全选", 44, (s, e) => SetAllChecks(true), 2);
             btnSelectNone = MakeButton("全不选", 56, (s, e) => SetAllChecks(false), 2);
             btnInvert = MakeButton("反选", 44, (s, e) => InvertChecks(), 6);
-            btnDownloadAll = MakeButton("下载全部章节", 92, (s, e) => DoDownloadAll(), 2);
-            btnDownload = MakeButton("下载选中章节", 92, (s, e) => DoDownload(), 2);
+            btnDownloadAll = MakeButton("下载全部", 68, (s, e) => DoDownloadAll(), 2);
+            btnDownload = MakeButton("下载选中", 68, (s, e) => DoDownload(), 2);
             btnCancel = MakeButton("取消", 44, (s, e) => { _cancel = true; Log("已请求取消，正在收尾…"); }, 6);
             btnCancel.Enabled = false;
-            btnOpenFolder = MakeButton("打开保存目录", 92, (s, e) => OpenFolder());
+            btnOpenFolder = MakeButton("打开目录", 68, (s, e) => OpenFolder());
+            new ToolTip().SetToolTip(btnOpenFolder, "打开保存这本书的文件夹");
+            btnUpdate = MakeButton("更新新章节", 80, (s, e) => DoUpdateExisting(), 2);
+            new ToolTip().SetToolTip(btnUpdate,
+                "检查这本书有没有新章节，只把新的补上去（追加到已有 txt 末尾，不动旧内容）。\n" +
+                "靠文件表头里的进度标记判断哪些章是新的；旧版本下载的文件没有标记，\n" +
+                "会提示你重新下载整本。");
+            btnExportEpub = MakeButton("导出 EPUB", 72, (s, e) => DoExportEpub(), 6);
+            new ToolTip().SetToolTip(btnExportEpub,
+                "把这本书已下载的正文导出成 EPUB（手机阅读器、Kindle 都能直接打开）。\n" +
+                "只导出已经下载到本地的章节，不会联网。");
             lblSel = new Label
             {
                 Text = "（还没载入目录）",
@@ -302,7 +316,7 @@ namespace TomatoBiquga
                 Padding = new Padding(6, 0, 0, 0),
                 AutoEllipsis = true,      // 窗口太窄时显示"…"，不会盖住按钮
             };
-            _chapFlow.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownloadAll, btnDownload, btnCancel, btnOpenFolder });
+            _chapFlow.Controls.AddRange(new Control[] { btnSelectAll, btnSelectNone, btnInvert, btnDownloadAll, btnDownload, btnCancel, btnUpdate, btnExportEpub, btnOpenFolder });
             chapBar.Controls.Add(lblSel);
             chapBar.Controls.Add(_chapFlow);
             split.Panel2.Controls.Add(lstChapters);
@@ -1245,6 +1259,282 @@ namespace TomatoBiquga
         /// <summary>自动化测试时置 true，避免弹窗卡住测试</summary>
         internal bool SuppressDialogs { get; set; }
 
+        // ------------------------------------------------------------ 增量更新 / EPUB 导出
+
+        /// <summary>
+        /// 「更新已下载的书」：检查站点上这本书有没有新章节，只把新的补上去。
+        /// 判断依据是文件表头里的进度标记（累计章数 + 前 N 章 id 指纹）。
+        /// </summary>
+        private void DoUpdateExisting()
+        {
+            if (_busy) { BusyNotice(Text); return; }
+            if (_currentBook == null) { MessageBox.Show("请先载入一本书的目录"); return; }
+
+            var book = _currentBook;
+            string root = txtOutput.Text.Trim();
+            if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+
+            string bookDir, txtPath;
+            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            if (!File.Exists(txtPath))
+            {
+                MessageBox.Show("这本书还没有下载过（找不到文件）：\n" + txtPath +
+                    "\n\n请先点「下载全部章节」。", "更新已下载的书",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            int done; string fp; int bodyBytes;
+            if (!DownloadRunner.TryReadProgress(txtPath, out done, out fp, out bodyBytes))
+            {
+                MessageBox.Show("这个文件是旧版本下载的，里面没有进度标记，没法安全判断『哪些章是新的』。\n\n" +
+                    "没有标记就只能猜，猜错会把正文顺序弄乱 —— 所以宁可不做。\n\n" +
+                    "想用增量更新：先点「下载全部章节」重新下一本（会写成带标记的新格式）。",
+                    "更新已下载的书", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // 指纹校验：前 done 章的 id 若已变化（站点改了目录/换了源），追加会让正文错位
+            var idsNow = new StringBuilder();
+            for (int i = 0; i < done && i < book.Chapters.Count; i++)
+                idsNow.Append(book.Chapters[i].Id).Append('|');
+            if (DownloadRunner.Fingerprint(idsNow.ToString()) != fp)
+            {
+                MessageBox.Show("这本书的目录已经变了（站点可能改了章节顺序或换了内容源），\n" +
+                    "直接追加新章节会让正文顺序错乱。\n\n" +
+                    "建议点「刷新目录」，再点「下载全部章节」重新下一遍。",
+                    "目录已变化，不能安全追加", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (book.Chapters.Count <= done)
+            {
+                MessageBox.Show(string.Format("已经是最新的了：文件里累计 {0} 章，站点上也是 {1} 章。\n\n{2}",
+                    done, book.Chapters.Count, txtPath), "更新已下载的书",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var fresh = new List<ChapterInfo>();
+            for (int i = done; i < book.Chapters.Count; i++)
+            {
+                var c = book.Chapters[i];
+                if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
+                fresh.Add(c);
+            }
+            if (fresh.Count == 0)
+            {
+                MessageBox.Show(string.Format("站点上多了 {0} 个条目，但都是分卷标题，没有新章节。",
+                    book.Chapters.Count - done), "更新已下载的书",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            Log(string.Format("=== 增量更新：《{0}》 已有 {1} 章，发现 {2} 章新章节 ===", book.Title, done, fresh.Count));
+            Log("新章节会追加到文件末尾，已有正文不会被改动。");
+
+            var site = _site;
+            var startCumulative = done;
+            RunBackground("更新中…", () =>
+            {
+                var extra = new DownloadRunner
+                {
+                    Site = site,
+                    Book = book,
+                    Chapters = fresh,
+                    RootDir = root,
+                    Log = Log,
+                    RetryPasses = _settings.RetryPasses,
+                    AppendToExistingFile = true,
+                    CumulativeOkCount = startCumulative,
+                    IsCanceled = () => _cancel,
+                    OnProgress = (n, total) => UiInvoke(() =>
+                    {
+                        progress.Minimum = 0;
+                        progress.Maximum = total;
+                        progress.Value = Math.Min(n, total);
+                        lblStatus.Text = string.Format("更新中 {0}/{1} 章（新章节）…", n, total);
+                    }),
+                };
+                extra.Run();
+                UiInvoke(() => lblStatus.Text = string.Format("更新结束：新增 {0} 章，累计 {1} 章",
+                    extra.Ok, startCumulative + extra.Ok));
+                ReportDownloadFinished(extra);
+            });
+        }
+
+        /// <summary>
+        /// 「导出 EPUB」：把这本书**已经下载到本地**的正文导出成 epub（不联网）。
+        /// 优先用内存里的正文；没有就按章节标题从已生成的 txt 里解析回来。
+        /// </summary>
+        private void DoExportEpub()
+        {
+            if (_busy) { BusyNotice(Text); return; }
+            if (_currentBook == null) { MessageBox.Show("请先载入一本书的目录"); return; }
+
+            var book = _currentBook;
+            string root = txtOutput.Text.Trim();
+            if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+            string bookDir, txtPath;
+            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+
+            var chapters = new List<ChapterInfo>();
+            foreach (var c in book.Chapters)
+            {
+                if (c == null || c.IsVolume) continue;
+                if (!string.IsNullOrEmpty(c.Text)) chapters.Add(c);
+            }
+
+            if (chapters.Count == 0)
+            {
+                if (!File.Exists(txtPath))
+                {
+                    MessageBox.Show("这本书还没有下载过，也没有可导出的正文。\n\n请先点「下载全部章节」。",
+                        "导出 EPUB", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                chapters = ParseTxtIntoChapters(txtPath, book);
+                Log(string.Format("从 txt 解析出 {0} 章正文用于导出。", chapters.Count));
+            }
+
+            if (chapters.Count == 0)
+            {
+                MessageBox.Show("没能从文件里解析出正文（文件可能是空的）。", "导出 EPUB",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var epubPath = Path.Combine(bookDir, Http.SafeFileName(book.Title) + ".epub");
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                EpubWriter.Write(epubPath, book, chapters, null, null);
+                var size = new FileInfo(epubPath).Length;
+                Log(string.Format("EPUB 已生成：{0}（{1:N0} 字节，{2} 章）", epubPath, size, chapters.Count));
+                if (!SuppressDialogs)
+                    MessageBox.Show(string.Format("EPUB 导出完成！\n\n章节数：{0}\n文件大小：{1:N0} 字节（{2:N2} MB）\n\n文件位置：\n{3}",
+                        chapters.Count, size, size / 1048576.0, epubPath), "导出 EPUB",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Log("导出 EPUB 失败：" + ex.Message);
+                if (!SuppressDialogs)
+                    MessageBox.Show("导出失败：" + ex.Message, "导出 EPUB",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally { Cursor = Cursors.Default; }
+        }
+
+        /// <summary>
+        /// 把已生成的 txt 反向解析成"章节 + 正文"（导出 EPUB 用）。
+        /// 用书里已有的章节标题做锚点，比"猜分隔符"可靠；认不出来就返回空列表
+        /// （宁可少导出，也不要导出一堆错乱内容）。
+        /// </summary>
+        internal static List<ChapterInfo> ParseTxtIntoChapters(string txtPath, BookInfo book)
+        {
+            var hits = new List<ChapterInfo>();
+            var positions = new List<int>();
+            try
+            {
+                var text = File.ReadAllText(txtPath, Encoding.UTF8);
+                var order = new List<ChapterInfo>();
+                foreach (var c in book.Chapters)
+                    if (c != null && !c.IsVolume && !string.IsNullOrEmpty(c.Id)) order.Add(c);
+                if (order.Count == 0) return hits;
+
+                int searchFrom = 0;
+                foreach (var c in order)
+                {
+                    string title = c.Title == null ? "" : c.Title.Trim();
+                    if (title.Length == 0) continue;
+                    int at = text.IndexOf("\n" + title + "\n", searchFrom, StringComparison.Ordinal);
+                    if (at < 0) at = text.IndexOf(title, searchFrom, StringComparison.Ordinal);
+                    if (at < 0) continue;
+                    hits.Add(c);
+                    positions.Add(at);
+                    searchFrom = at + 1;
+                }
+                if (hits.Count == 0) return hits;
+
+                var result = new List<ChapterInfo>();
+                for (int i = 0; i < hits.Count; i++)
+                {
+                    int start = positions[i];
+                    int end = (i + 1 < positions.Count) ? positions[i + 1] : text.Length;
+                    var lines = text.Substring(start, end - start).Split('\n');
+                    var body = new StringBuilder();
+                    for (int li = 0; li < lines.Length; li++)
+                    {
+                        var line = lines[li].TrimEnd('\r').Trim();
+                        if (line.Length == 0) continue;
+                        if (li <= 2) continue;                                        // 标题行 + 分隔线
+                        if (line.Length >= 6 && line.Trim('-').Length == 0) continue; // 破折号分隔线
+                        body.AppendLine(line);
+                    }
+                    var bodyText = body.ToString().TrimEnd();
+                    if (bodyText.Length == 0) continue;
+                    result.Add(new ChapterInfo
+                    {
+                        Id = hits[i].Id,
+                        Title = hits[i].Title,
+                        Order = hits[i].Order,
+                        Text = bodyText,
+                    });
+                }
+                return result;
+            }
+            catch { return new List<ChapterInfo>(); }
+        }
+
+        /// <summary>
+        /// 下载/更新结束后的统一收尾：打印统计、写缺失报告说明、弹窗告知文件位置。
+        /// 普通下载和增量更新共用，避免两处报告写得不一致。
+        /// </summary>
+        internal void ReportDownloadFinished(DownloadRunner runner)
+        {
+            Log("=== 下载结束 ===");
+            Log(string.Format("成功 {0} 章，跳过 {1} 章（站点公告/空内容），失败 {2} 章",
+                runner.Ok, runner.Skipped, runner.Failed));
+            Log("保存位置：" + runner.OutputFile);
+            if (runner.Failed > 0) Log("失败的章节可重新勾选后再下一次（已下载内容会覆盖为完整版本）。");
+            if (!string.IsNullOrEmpty(runner.ReportFile)) Log("缺失章节明细：" + runner.ReportFile);
+            try
+            {
+                var fi = new FileInfo(runner.OutputFile);
+                Log(string.Format("文件大小：{0:N0} 字节，修改时间 {1}", fi.Length, fi.LastWriteTime));
+                if (SuppressDialogs) return;
+
+                var miss = new StringBuilder();
+                if (runner.FailedChapters.Count > 0)
+                {
+                    miss.AppendLine();
+                    miss.AppendLine(string.Format("⚠ 有 {0} 章失败（网络/风控）：", runner.FailedChapters.Count));
+                    for (int i = 0; i < runner.FailedChapters.Count && i < 5; i++)
+                        miss.AppendLine("   · 第 " + runner.FailedChapters[i].Order + " 章 " + runner.FailedChapters[i].Title);
+                    if (runner.FailedChapters.Count > 5) miss.AppendLine("   · …");
+                    miss.AppendLine("   已自动重试过，还是失败；可重新勾选这几章再下一次。");
+                }
+                if (runner.SkippedChapters.Count > 0)
+                {
+                    miss.AppendLine();
+                    miss.AppendLine(string.Format("ℹ 有 {0} 章被跳过：站点这一章本身就是空的（“正在手打中，请稍等片刻”），",
+                        runner.SkippedChapters.Count));
+                    miss.AppendLine("   不是工具的 bug，换源也一样没有内容。");
+                }
+                if (!string.IsNullOrEmpty(runner.ReportFile))
+                    miss.AppendLine().AppendLine("缺哪些章看这个文件：").AppendLine(runner.ReportFile);
+
+                MessageBox.Show(
+                    string.Format("下载完成！\n\n成功 {0} 章，跳过 {1} 章，失败 {2} 章\n" +
+                                  "文件大小：{3:N0} 字节（{4:N2} MB）\n\n文件位置：\n{5}\n{6}\n" +
+                                  "点「打开保存目录」可直接打开所在文件夹。",
+                        runner.Ok, runner.Skipped, runner.Failed, fi.Length, fi.Length / 1048576.0,
+                        runner.OutputFile, miss.ToString()),
+                    "下载完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex) { Log("读取文件信息失败：" + ex.Message); }
+        }
         private void OpenFolder()
         {
             // 刚用官方工具下过番茄小说，就打开它的目录（书存在那边）

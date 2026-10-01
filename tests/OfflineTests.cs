@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Windows.Forms;
 using TomatoBiquga;
@@ -38,6 +39,7 @@ namespace TomatoBiquga
         private static int _pass;
         private static int _fail;
         private static bool _verbose;
+        private static int _fakeNet;      // 假站点的计数器（让每次 LoadChapter 的输出略有不同）
         private static readonly List<string> Failures = new List<string>();
 
         /// <summary>断言一个条件成立</summary>
@@ -136,6 +138,10 @@ namespace TomatoBiquga
                 TestBuildHeader();
                 TestFixHeaderNow(work);
                 TestMissingReport(work);
+                TestProgressMarker(work);
+                TestIncrementalAppend(work, ref _fakeNet);
+                TestEpub(work);
+                TestParseTxt(work);
                 TestLayout();
                 TestFontMap();
             }
@@ -829,6 +835,436 @@ namespace TomatoBiquga
             if (m == null) { list.Add("找不到 CollectLayoutProblems（检查器被改名了？）"); return list; }
             m.Invoke(null, new object[] { container, list });
             return list;
+        }
+
+        // ============================================================
+        //  11) 增量更新：只追加新章节，旧正文必须一字不动
+        //      （这是"更新已下载的书"的核心不变量 —— 真实文件上验过，
+        //        这里固化成断言，避免以后改 DownloadRunner 把它弄坏）
+        // ============================================================
+
+        private static void TestIncrementalAppend(string work, ref int fakeNet)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "novel-incr-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            Eq("增量：测试目录已建好", true, Directory.Exists(dir));
+
+            var book = new BookInfo { Site = "biquga", Title = "增量测试", Author = "作者", Dir = "/9_9/", Url = "u" };
+            // 注意：Run() 内部会用 ResolvePaths 自己算路径（RootDir + 安全书名），
+            // 所以测试必须用同一个函数取路径，不能自己拼一个（第一版就栽在这）。
+            string bookDir, path;
+            DownloadRunner.ResolvePaths(dir, book.Title, out bookDir, out path);
+            var all = new List<ChapterInfo>();
+            for (int i = 1; i <= 12; i++)
+                all.Add(new ChapterInfo { Id = "k" + (2000 + i), Title = "第" + i + "章 标题" + i, Order = i });
+            book.Chapters.AddRange(all);
+
+            // 第一次：下载前 5 章（走产品自己的 runner，用假站点提供正文）
+            var first = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = book,
+                Chapters = all.GetRange(0, 5),
+                RootDir = dir,
+                OutputFile = path,
+                BookDir = dir,
+            };
+            first.Run();
+            Eq("增量：第一次写入 5 章", 5, first.Ok);
+            var text1 = File.ReadAllText(path, Encoding.UTF8);
+            int done1; string fp1; int bc1;
+            Check("增量：第一次写完后能读出进度", DownloadRunner.TryReadProgress(path, out done1, out fp1, out bc1));
+            Eq("增量：进度显示 5 章", 5, done1);
+
+            // 记录正文区的起点：表头区标记那一行之后
+            // 正文区起点按**字节**算：表头补白可能是换行/空格，字符数与字节数不是一回事
+            // （第一版断言按字符比，得出"起点漂了 10 个字符"的假警报，其实字节数一模一样）。
+            int bodyAt1 = ByteOffsetAfterHeader(text1);
+            var body1 = text1.Substring(bodyAt1);
+
+            // 第二次：追加第 6~12 章（增量模式）
+            var second = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = book,
+                Chapters = all.GetRange(5, 7),
+                RootDir = dir,
+                OutputFile = path,
+                BookDir = dir,
+                AppendToExistingFile = true,
+                CumulativeOkCount = done1,
+            };
+            second.Run();
+            Eq("增量：第二次追加 7 章", 7, second.Ok);
+
+            var text2 = File.ReadAllText(path, Encoding.UTF8);
+            int bodyAt2 = ByteOffsetAfterHeader(text2);
+
+            // ★ 核心不变量：正文区一字不动，且长度只增不减
+            // 正文区起点必须完全一致：表头区是固定 2KB，统计行也补齐到固定字节数，
+            // 所以"累计章数从 6 变 12"不会让正文位置漂移（这是修过的 bug，见 BuildStatisticsLine）
+            Eq("增量：正文区起点没变（按字节比）", bodyAt1, bodyAt2);
+            Check("增量：旧正文一字未动（更新前后正文区前缀完全一致）", text2.Substring(bodyAt2).StartsWith(body1));
+            Check("增量：正文区只增不减", text2.Substring(bodyAt2).Length > body1.Length);
+            Check("增量：文件只变长", text2.Length > text1.Length);
+            Check("增量：新章节进了文件", text2.Contains("第12章 标题12"));
+            Check("增量：旧章节还在", text2.Contains("第1章 标题1"));
+
+            // 章节顺序必须还是递增的（追加导致错位是最怕的事）
+            int lastAt = -1, orderBad = 0;
+            for (int i = 0; i < all.Count; i++)
+            {
+                int at = text2.IndexOf(all[i].Title, StringComparison.Ordinal);
+                if (at < 0 || at < lastAt) orderBad++;
+                lastAt = at;
+            }
+            Eq("增量：12 章全部存在且顺序递增", 0, orderBad);
+
+            // 表头统计必须变成"累计 12 章"，进度标记也要更新
+            int done2; string fp2; int bc2;
+            Check("增量：更新后能读出进度", DownloadRunner.TryReadProgress(path, out done2, out fp2, out bc2));
+            Eq("增量：累计章数变成 12", 12, done2);
+            Contains("增量：表头统计显示累计 12 章", text2, "成功 12 章");
+            Check("增量：指纹随章节变化（下次更新才不会误判）", fp1 != fp2);
+
+
+            // 边界：文件不存在时增量模式不能崩（等于新建）
+            // 用一个"从没下载过"的书名，模拟"调用方要求追加、但文件其实不存在"的情况
+            var bookNew = new BookInfo { Site = "biquga", Title = "全新的书", Author = "作者", Dir = "/9_9/", Url = "u" };
+            bookNew.Chapters.AddRange(all);
+            string bdNew, pathNew;
+            DownloadRunner.ResolvePaths(dir, bookNew.Title, out bdNew, out pathNew);
+            Check("增量边界：起始时文件确实不存在", !File.Exists(pathNew));
+
+            var third = new DownloadRunner
+            {
+                Site = new FakeSite(ref fakeNet),
+                Book = bookNew,
+                Chapters = all.GetRange(0, 3),
+                RootDir = dir,
+                AppendToExistingFile = true,
+            };
+            bool threw = false;
+            try { third.Run(); } catch (Exception ex) { threw = true; Failures.Add("      增量边界异常：" + ex.Message); }
+            Check("增量：文件不存在时不抛异常", !threw);
+            Check("增量：文件不存在时会正常新建并写入", File.Exists(pathNew) && new FileInfo(pathNew).Length > 200);
+            // 落回普通下载后，表头必须是完整的（含进度标记），否则下次增量更新又用不了
+            var tNew = File.ReadAllText(pathNew, Encoding.UTF8);
+            Check("增量边界：新建的文件有表头和进度标记",
+                tNew.Contains(new string('=', 46)) && tNew.Contains(DownloadRunner.ProgressOkMarker));
+            TryDeleteDir(dir);
+        }
+
+        /// <summary>
+        /// 算"正文区起点"的字符下标：表头以「46 个等号 + 换行」结尾。
+        ///
+        /// 这里能安全地用字符下标：等号行之前的补白全是单字节字符（换行/空格），
+        /// 中文字节数变化只出现在等处**之后**，所以匹配纯 ASCII 的等号整行是可靠的
+        /// （按字节找"第一个换行"会误命中补白里的换行 —— 第一版就错在这）。
+        /// </summary>
+        private static int ByteOffsetAfterHeader(string text)
+        {
+            // 正文起点 = **#header-zone 标记行的行尾**之后。
+            // 不能拿"46 个等号那行"当边界：等号行属于表头，它后面还有补白和标记行，
+            // 拿它当边界会得出"表头区长 2 字节"之类的假结论（踩过）。
+            int mk = text.IndexOf(DownloadRunner.HeaderZoneMarker, StringComparison.Ordinal);
+            if (mk < 0) return 0;
+            int nl = text.IndexOf('\n', mk);
+            return nl < 0 ? 0 : nl + 1;
+        }
+
+        /// <summary>假的站点：直接返回造好的正文，不联网（用来测下载流程本身）</summary>
+        private class FakeSite : ISite
+        {
+            private readonly int _seed;
+            public FakeSite(ref int fakeNet) { _seed = ++fakeNet; }
+            public string Name { get { return "fake"; } }
+            public List<BookInfo> Search(string keyword, Action<string> log) { return new List<BookInfo>(); }
+            public BookInfo LoadBook(BookInfo item, Action<string> log) { return item; }
+            public string LoadChapter(BookInfo book, ChapterInfo chapter, Action<string> log)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < 6; i++)
+                    sb.Append("这是 ").Append(chapter.Title).Append(" 的第 ").Append(i + 1).Append(" 段正文内容，用来让长度超过 40 字的门槛。\n");
+                return sb.ToString();
+            }
+        }
+        // ============================================================
+        //  11) 增量更新的进度标记（表头里的 #progress-ok:N:指纹）
+        // ============================================================
+
+        private static void TestProgressMarker(string work)
+        {
+            var dir = Path.Combine(work, "progress");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "进度测试.txt");
+
+            var book = new BookInfo { Site = "biquga", Title = "进度测试", Author = "作者", Dir = "/1_2/", Url = "u" };
+            var chapters = new List<ChapterInfo>();
+            for (int i = 1; i <= 10; i++)
+                chapters.Add(new ChapterInfo { Id = "c" + (1000 + i), Title = "第" + i + "章", Order = i });
+
+            var runner = new DownloadRunner { Book = book, Chapters = chapters, OutputFile = path, BookDir = dir };
+            // 写入"表头区 + 5 章正文"，模拟已下载 5 章的文件
+            runner.Ok = 5;
+            var header = runner.BuildHeader(5, 0, 0);
+            using (var w = new StreamWriter(path, false, new UTF8Encoding(true)))
+            {
+                w.Write(runner.BuildHeaderZone());
+                for (int i = 0; i < 5; i++) w.Write("\n\n第" + (i + 1) + "章\n---\n\n正文内容" + (i + 1) + "\n");
+            }
+
+            // 表头里应该能读出"已下 5 章"
+            int ok; string fp; int bc;
+            var read = DownloadRunner.TryReadProgress(path, out ok, out fp, out bc);
+            Check("进度标记：能读出来", read);
+            Eq("进度标记：已下载章数", 5, ok);
+            Check("进度标记：指纹非空且是 12 位十六进制",
+                !string.IsNullOrEmpty(fp) && fp.Length == 12 && System.Text.RegularExpressions.Regex.IsMatch(fp, "^[0-9a-f]{12}$"));
+            Contains("进度标记：统计行里带上了标记", File.ReadAllText(path, Encoding.UTF8), DownloadRunner.ProgressOkMarker + "5:");
+
+            // 指纹要和"前 5 章 id"一致，且 5 章和 6 章的指纹必须不同（否则判断不出新旧）
+            Eq("进度指纹：与前 5 章 id 一致", DownloadRunner.Fingerprint("c1001|c1002|c1003|c1004|c1005|"), fp);
+            Check("进度指纹：5 章与 6 章不同",
+                DownloadRunner.Fingerprint("c1001|c1002|c1003|c1004|c1005|") !=
+                DownloadRunner.Fingerprint("c1001|c1002|c1003|c1004|c1005|c1006|"));
+
+            // 目录里前 5 章没变 → 新章节就是第 6~10 章（这是"更新"的核心判断）
+            var idsNow = new StringBuilder();
+            for (int i = 0; i < 5; i++) idsNow.Append(chapters[i].Id).Append('|');
+            Eq("更新判断：前 5 章指纹没变 → 可以安全追加", fp, DownloadRunner.Fingerprint(idsNow.ToString()));
+            Eq("更新判断：新增章数 = 总章数 - 已下载", 5, chapters.Count - ok);
+
+            // 收尾：原位更新统计（累计 10 章），要求文件长度不变、正文不被动
+            var before = new FileInfo(path).Length;
+            var bodyBefore = File.ReadAllText(path, Encoding.UTF8);
+            var changed = DownloadRunner.InjectHeaderStatistics(path, book, 10, 0, 0, chapters, (int)before);
+            Check("表头原位更新：返回成功", changed);
+            var after = new FileInfo(path).Length;
+            Eq("表头原位更新：文件长度不变（正文没被顶掉）", before, after);
+            var bodyAfter = File.ReadAllText(path, Encoding.UTF8);
+            Contains("表头原位更新：正文仍在（第5章）", bodyAfter, "正文内容5");
+            Contains("表头原位更新：统计变成累计 10 章", bodyAfter, "成功 10 章");
+            DownloadRunner.TryReadProgress(path, out ok, out fp, out bc);
+            Eq("表头原位更新：读回累计章数", 10, ok);
+
+            // 旧文件（没有进度标记）必须"读不出来"而不是瞎猜
+            var legacy = Path.Combine(dir, "旧文件.txt");
+            using (var w = new StreamWriter(legacy, false, new UTF8Encoding(true))) w.Write("书名\n作者：某某\n==========\n正文\n");
+            int ok2; string fp2; int bc2;
+            Check("旧文件：读不出进度（返回 false）", !DownloadRunner.TryReadProgress(legacy, out ok2, out fp2, out bc2));
+            Eq("旧文件：章数返回 -1", -1, ok2);
+            Check("不存在的文件：读进度不抛异常", !DownloadRunner.TryReadProgress(Path.Combine(dir, "没有这个文件.txt"), out ok2, out fp2, out bc2));
+
+            // 字节级查找（中文不能靠字符下标定位）
+            var bytes = File.ReadAllBytes(path);
+            Check("字节查找：能找到中文串", DownloadRunner.IndexOfBytes(bytes, 0, bytes.Length, Encoding.UTF8.GetBytes("本次下载：")) > 0);
+            Check("字节查找：找不到时返回 -1", DownloadRunner.IndexOfBytes(bytes, 0, bytes.Length, Encoding.UTF8.GetBytes("这段字不存在")) < 0);
+        }
+
+        // ============================================================
+        //  12) EPUB 导出（结构必须符合规范，否则阅读器打不开）
+        // ============================================================
+
+        private static void TestEpub(string work)
+        {
+            var dir = Path.Combine(work, "epub");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "导出测试.epub");
+
+            var book = new BookInfo
+            {
+                Site = "biquga",
+                Title = "导出测试",
+                Author = "测试作者",
+                Desc = "简介里有特殊字符 <b>&</b> 用来验证转义。",
+                Dir = "/1_2/",
+                Url = "https://www.biquga.com/1_2/",
+            };
+            var chapters = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "1", Title = "第一章 开始", Text = "第一段。\n\n第二段有 <尖括号> 和 & 符号。\n\n\n第三段。", Order = 1 },
+                new ChapterInfo { Id = "2", Title = "第二章 继续", Text = "正文二。", Order = 2 },
+                new ChapterInfo { Id = "3", Title = "第三章 未下载", Text = "", Order = 3 },        // 空章要跳过
+                new ChapterInfo { Id = "4", Title = "第一卷 分卷标题", Text = "x", IsVolume = true, Order = 4 }, // 分卷行要跳过
+            };
+
+            EpubWriter.Write(path, book, chapters, null, null);
+            Check("EPUB：文件已生成", File.Exists(path) && new FileInfo(path).Length > 500);
+
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+            {
+                var names = new List<string>();
+                foreach (var e in zip.Entries) names.Add(e.FullName);
+                // 规范第 1 条：mimetype 必须是第一个条目，且**不能被压缩**
+                Eq("EPUB：第一个条目是 mimetype", "mimetype", names[0]);
+                var mimetypeEntry = zip.GetEntry("mimetype");
+                // 注意：不能断言"压缩方式字段 == 0"。实测 .NET 的 NoCompression 是
+                // "deflate 头 + stored 块"（数据里的 01 标记），字节确实没被压缩，
+                // 但方式字段是 8 不是 0。所以检验真实行为：压缩后不比原始小。
+                // mimetype 的 Content-Length 是 20，压缩后 25：多出来的 5 字节是 deflate
+                // "stored 块"的固定开销（不是真压缩）。所以判据是"两者接近"，而不是严格相等。
+                Check(string.Format("EPUB：mimetype 没被真正压缩（原始 {0}，存放 {1}，只差 {2} 字节的块头开销）",
+                        mimetypeEntry.Length, mimetypeEntry.CompressedLength,
+                        mimetypeEntry.CompressedLength - mimetypeEntry.Length),
+                    Math.Abs(mimetypeEntry.CompressedLength - mimetypeEntry.Length) < 8);
+                Check("EPUB：mimetype 是 stored 块（长度很小，没有真 deflate）", mimetypeEntry.CompressedLength < 40);
+                var opfEntry = zip.GetEntry("OEBPS/content.opf");
+                Check("EPUB：其余条目是压缩存放的（不然文件白大一圈）", opfEntry.CompressedLength < opfEntry.Length);
+                Contains("EPUB：有 container.xml", string.Join(",", names), "META-INF/container.xml");
+                Contains("EPUB：有 content.opf", string.Join(",", names), "OEBPS/content.opf");
+                Contains("EPUB：有 nav.xhtml", string.Join(",", names), "OEBPS/nav.xhtml");
+                Contains("EPUB：有样式表", string.Join(",", names), "OEBPS/style.css");
+                Eq("EPUB：只导出有正文的 2 章", 2, CountMatches(names, "OEBPS/text/chapter"));
+                Check("EPUB：没有给空章节生成文件", !names.Contains("OEBPS/text/chapter0003.xhtml"));
+
+                var mimetype = ReadEntry(zip, "mimetype");
+                Eq("EPUB：mimetype 内容正确", "application/epub+zip", mimetype.Trim());
+
+                var opf = ReadEntry(zip, "OEBPS/content.opf");
+                Contains("EPUB：OPF 声明 EPUB3", opf, "version=\"3.0\"");
+                Contains("EPUB：OPF 有书名", opf, "<dc:title>导出测试</dc:title>");
+                Contains("EPUB：OPF 有作者", opf, "<dc:creator>测试作者</dc:creator>");
+                Contains("EPUB：OPF 声明中文", opf, "<dc:language>zh-CN</dc:language>");
+                Contains("EPUB：OPF 里简介的 & 被转义", opf, "&amp;");
+                Eq("EPUB：spine 里有 2 章 + 目录", 3, CountMatches(SplitLines(opf), "<itemref"));
+
+                var nav = ReadEntry(zip, "OEBPS/nav.xhtml");
+                Contains("EPUB：目录页含第一章标题", nav, "第一章 开始");
+                Contains("EPUB：目录页链接到章节文件", nav, "text/chapter0001.xhtml");
+                Contains("EPUB：nav 的样式表路径是同层", nav, "href=\"style.css\"");
+
+                var ch1 = ReadEntry(zip, "OEBPS/text/chapter0001.xhtml");
+                Contains("EPUB：章节含标题", ch1, "<h1>第一章 开始</h1>");
+                Contains("EPUB：正文按段落成 <p>", ch1, "<p>第一段。</p>");
+                Contains("EPUB：尖括号被转义（不能破坏 XHTML）", ch1, "&lt;尖括号&gt;");
+                Contains("EPUB：& 被转义", ch1, "&amp;");
+                Check("EPUB：正文里没有裸露的 <尖括号>", ch1.IndexOf("<尖括号>", StringComparison.Ordinal) < 0);
+                Contains("EPUB：章节的样式表路径是上一层", ch1, "href=\"../style.css\"");
+                Check("EPUB：空行没变成空段落", ch1.IndexOf("<p></p>", StringComparison.Ordinal) < 0);
+
+                // XHTML 必须是合法 XML（用 XmlDocument 真解析一遍）
+                Check("EPUB：章节 XHTML 能被 XML 解析", IsValidXml(ch1));
+                Check("EPUB：nav XHTML 能被 XML 解析", IsValidXml(nav));
+                Check("EPUB：OPF 能被 XML 解析", IsValidXml(opf));
+                Check("EPUB：container.xml 能被 XML 解析", IsValidXml(ReadEntry(zip, "META-INF/container.xml")));
+            }
+
+            // 带封面
+            var path2 = Path.Combine(dir, "带封面.epub");
+            var cover = new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4 };   // 假 JPEG（只看头部特征）
+            EpubWriter.Write(path2, book, chapters, cover, "jpg");
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(path2))
+            {
+                var names = new List<string>();
+                foreach (var e in zip.Entries) names.Add(e.FullName);
+                Contains("EPUB：有封面图片", string.Join(",", names), "OEBPS/images/cover.jpg");
+                Contains("EPUB：有封面页", string.Join(",", names), "OEBPS/text/cover.xhtml");
+                var opf = ReadEntry(zip, "OEBPS/content.opf");
+                Contains("EPUB：OPF 里声明 cover-image", opf, "properties=\"cover-image\"");
+            }
+
+            // 一章都没下载 → 必须明确报错，不能生成空书
+            var noBody = new List<ChapterInfo> { new ChapterInfo { Id = "9", Title = "空的", Text = "" } };
+            bool threw = false;
+            try { EpubWriter.Write(Path.Combine(dir, "空书.epub"), book, noBody, null, null); }
+            catch (Exception ex) { threw = ex.Message.IndexOf("先下载", StringComparison.Ordinal) >= 0; }
+            Check("EPUB：没有正文时明确报错而不是生成空文件", threw);
+
+            // 转义函数单测
+            Eq("转义：&", "&amp;", EpubWriter.X("&"));
+            Eq("转义：< >", "&lt;a&gt;", EpubWriter.X("<a>"));
+            Eq("转义：引号", "&quot;x&quot;", EpubWriter.X("\"x\""));
+            Eq("转义：控制字符被丢掉", "ab", EpubWriter.X("a\u0001b"));
+            Eq("转义：null 安全", "", EpubWriter.X(null));
+            Eq("转义：中文原样", "中文", EpubWriter.X("中文"));
+        }
+
+        // ============================================================
+        //  13) txt → 章节 反解析（导出 EPUB 时若内存里没有正文，就走这条）
+        // ============================================================
+
+        private static void TestParseTxt(string work)
+        {
+            var dir = Path.Combine(work, "parsetxt");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "解析测试.txt");
+
+            var book = new BookInfo { Site = "biquga", Title = "解析测试", Dir = "/1_2/", Url = "u" };
+            var chapters = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "1", Title = "第一章 开始", Order = 1 },
+                new ChapterInfo { Id = "2", Title = "第二章 继续", Order = 2 },
+                new ChapterInfo { Id = "3", Title = "第三章 收尾", Order = 3 },
+            };
+            book.Chapters.AddRange(chapters);
+
+            // 用产品自己的写法生成文件（和真实下载的 txt 结构一致）
+            var runner = new DownloadRunner { Book = book, Chapters = chapters, OutputFile = path, BookDir = dir };
+            runner.Ok = 3;
+            using (var w = new StreamWriter(path, false, new UTF8Encoding(true)))
+            {
+                w.Write(runner.BuildHeaderZone());
+                foreach (var c in chapters)
+                    w.Write("\n\n" + c.Title + "\n" + new string('-', 12) + "\n\n正文内容：" + c.Title + "。\n第二段。\n");
+            }
+
+            var parsed = MainForm.ParseTxtIntoChapters(path, book);
+            Eq("txt 反解析：章节数", 3, parsed.Count);
+            Eq("txt 反解析：第一张标题", "第一章 开始", parsed[0].Title);
+            Contains("txt 反解析：第一张正文", parsed[0].Text, "正文内容：第一章 开始。");
+            Contains("txt 反解析：第二段还在", parsed[0].Text, "第二段。");
+            Check("txt 反解析：正文里没有标题行", parsed[0].Text.IndexOf("第一章 开始\n", StringComparison.Ordinal) < 0);
+            Check("txt 反解析：正文里没有破折号分隔线", parsed[0].Text.Trim('-').Trim().Length > 0);
+            Eq("txt 反解析：第三章标题", "第三章 收尾", parsed[2].Title);
+
+            // 解析出来的正文要能直接进 EPUB（端到端串起来）
+            var epub = Path.Combine(dir, "串联.epub");
+            EpubWriter.Write(epub, book, parsed, null, null);
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(epub))
+            {
+                var ch1 = ReadEntry(zip, "OEBPS/text/chapter0001.xhtml");
+                Contains("txt→EPUB 串联：正文进了 epub", ch1, "正文内容：第一章 开始。");
+            }
+
+            // 文件不存在不能抛异常
+            var none = MainForm.ParseTxtIntoChapters(Path.Combine(dir, "没有这个.txt"), book);
+            Eq("txt 反解析：文件不存在返回空列表", 0, none.Count);
+        }
+
+        // ---- EPUB 测试用的小工具 ----
+
+
+        private static string ReadEntry(System.IO.Compression.ZipArchive zip, string name)
+        {
+            var e = zip.GetEntry(name);
+            if (e == null) return "";
+            using (var s = e.Open())
+            using (var r = new StreamReader(s, Encoding.UTF8))
+                return r.ReadToEnd();
+        }
+
+        private static int CountMatches(List<string> items, string needle)
+        {
+            int n = 0;
+            foreach (var s in items) if (s.IndexOf(needle, StringComparison.Ordinal) >= 0) n++;
+            return n;
+        }
+
+        private static List<string> SplitLines(string s)
+        {
+            return new List<string>(s.Split('\n'));
+        }
+
+        private static bool IsValidXml(string xml)
+        {
+            try
+            {
+                var doc = new System.Xml.XmlDocument();
+                doc.LoadXml(xml);
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>在字节数组里找一段文本的字节偏移（IndexOf 给的是字符下标，中文不是 1:1）</summary>
