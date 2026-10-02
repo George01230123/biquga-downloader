@@ -20,11 +20,11 @@
 ## 一、快速开始
 
 **下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
-（`novel-downloader-v1.1.0-win64.zip`，约 100 KB —— 程序本体 + 启动器 + 文档）
+（`novel-downloader-v1.1.1-win64.zip`，约 100 KB —— 程序本体 + 启动器 + 文档）
 
-> 另有一个 `...-selftest.zip`（约 370 KB）：多带了 `_offlinetests.exe` / `_e2e.exe` / `_selftest.exe`
-> 三个自测程序，**不需要它们也能正常下载**，只是下载出问题时用来定位。
-> 提 issue 时把前两个的输出贴上来就够我判断了。
+> 另有一个 `...-selftest.zip`：多带了 `_offlinetests.exe` / `_e2e.exe` / `_liveprobe.exe` / `_selftest.exe`
+> 四个自测程序，**不需要它们也能正常下载**，只是下载出问题时用来定位。
+> 提 issue 时把前两个的输出贴上来就够我判断了（前两个不联网）。
 
 > **打不开 github.com？**（国内网络常见，本项目开发期间实测断过两次）
 > `api.github.com` 通常还是通的，粘这段到 PowerShell 就能下（不用改任何东西）：
@@ -155,8 +155,9 @@ build.bat
 | `_selftest.exe` | 命令行自测：`_selftest.exe dl /69_69707 6`、`biquga`、`fanqie`、`write` |
 | `_edgetest.exe` | 边界测试（含离屏真下载：把窗口移到屏幕外，跑一遍和界面完全相同的下载路径） |
 | `_layoutprobe.exe` | 界面布局体检：越界/重叠逐条报出来，`--shots` 还能出截图 |
-| `_offlinetests.exe` | **691 项离线单测，不联网**（CI 跑的就是它） |
+| `_offlinetests.exe` | **720 项离线单测，不联网**（CI 跑的就是它） |
 | `_e2e.exe` | **端到端集成校验，不联网**：造一整本书（分卷 + 封面 + 繁体）→ 导出 EPUB/Markdown → 把产物当外来文件重新打开验（mimetype 顺序、每个 XML 用 `XmlDocument` 真解析、封面字节在位、目录嵌套精确计数） |
+| `_liveprobe.exe` | **联网实测探针**（需要网络，不进离线门禁）：`cover` / `fanqie` / `export` 三个模式，验证真实站点的字段名、防盗链、以及"请求真的发出去了" |
 
 `build.bat` 第一步会跑 `build\fix-encoding.ps1`：自动把源码补成 UTF-8 带 BOM，
 并拒绝任何含中文的 `.bat`（这个坑踩过三次，见第六节）。
@@ -198,7 +199,7 @@ src/                 界面与入口
     FanqieSite.cs        番茄：目录 JSON 接口、风控识别
     TomatoCore.cs        第三方番茄工具的本地 API 对接（可选）
 tests/               自测：OfflineTests.cs（离线单测）、E2E.cs（端到端集成校验）、EdgeTest.cs、TestMain.cs
-tools/               开发辅助：QuickDownload.cs（批量下载）、DiagMobile.cs（诊断）
+tools/               开发辅助：LiveProbe.cs（联网实测探针）、QuickDownload.cs（批量下载）、DiagMobile.cs（诊断）
 build/               csproj（CI 用）、app.manifest、fix-encoding.ps1（编码守护）
 docs/                详细文档：[站点参数与补齐](docs/站点参数与补齐.md)、[更新与 EPUB](docs/更新与EPUB.md)、[架构](docs/架构.md)、[站点坑](docs/站点坑.md)、[同类工具调研](docs/同类工具调研.md)、[界面布局](docs/界面布局.md)、
                      [下载与网络问题](docs/下载与网络问题.md)、[GitHub 准备清单](docs/GITHUB准备清单.md)
@@ -258,6 +259,26 @@ docs/                详细文档：[站点参数与补齐](docs/站点参数与
    修法是把两步拆开（先算每章的"有效卷名"，再把同名的连续章节折叠成组），
    并且在 `tests/OfflineTests.cs` 里留了 `TestVolumeGroupingExact` 守着 ——
    这组断言经过**故障注入验证**：把坏逻辑塞回去，11 条单测 + 3 条 E2E 断言会立刻变红。
+
+7. **`UseShellExecute=false` 时没有 shell，`>` 不是重定向**
+   为了让 HTTP 状态码落到单独文件，我在 curl 命令行末尾拼了 `> "code.txt"`。
+   但 `ProcessStartInfo` 是**直接启动 `curl.exe`、不经过 cmd.exe** 的，
+   所以 `>` 被当成了 curl 的参数 → **每一次请求都返回 curl 退出码 3**，
+   整个程序完全不能用。**而 691 条离线单测全绿** —— 因为离线测试压根不发请求。
+   修法：去掉 shell 重定向，`-w` 的输出本来就在 stdout，用
+   `StandardOutput.ReadToEnd()` 接住即可。新增 16 条 `ParseHttpCode` 断言。
+
+   > 教训：测试的"输入"若是自己构造的，就永远测不到"输入本身是错的"。
+   > 所以加了 `_liveprobe.exe` —— 一条真的把请求发出去的断言。
+
+8. **加了字段要顺手加进缓存**
+   `BookInfo` 补上 `CoverUrl` / `WordCount` 后，`DirCache.CachedBook` 忘了跟 ——
+   后果是**第一次下载有封面，第二次（走目录缓存）封面就没了**，而且不报任何错。
+   现在有 `TestDirCacheRoundTrip` 守着"字段漏存"这类问题。
+
+9. **站点字段名不要靠猜**
+   番茄封面的字段名我按惯例写成了 `thumbUrl`，实测**真正的字段是 `thumbUri`** ——
+   也就是说番茄封面**从来就没抓到过**。这类只能靠真访问一次页面来确认。
 
 更多细节见 `docs/`。
 

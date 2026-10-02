@@ -76,6 +76,20 @@ rem per chapter. "Parts pass" does not mean "the produced book is valid".
  src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tests\E2E.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
+rem Live probe -- NEEDS NETWORK, so it is NOT part of the offline test gate:
+rem   _liveprobe.exe cover  "https://www.biquga.com/10_10333/"
+rem   _liveprobe.exe fanqie BOOK_ID
+rem   _liveprobe.exe export DOWNLOAD_ROOT BOOK_TITLE [cache dir]
+rem Why it must exist: a curl command line bug made EVERY request fail with
+rem exit code 3 while all 691 offline assertions stayed green -- that class of
+rem bug only shows up when a request is actually sent over the wire.
+rem NOTE: keep rem lines free of parentheses. cmd.exe parses them even inside
+rem rem, and a stray close-paren aborts the whole script with
+rem "the was unexpected at this time".
+"%CSC%" %FLAGS% /target:exe /main:LiveProbe /out:"dist\_liveprobe.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\LiveProbe.cs %COMMON% %SITES%
+if errorlevel 1 goto failed
+
 echo [5/6] Renaming GUI output (Chinese name, done in PowerShell)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=Join-Path (Get-Location) 'dist'; $src=Join-Path $d '_build_tmp.exe'; $dst=Join-Path $d ([char]0x5C0F+[char]0x8BF4+[char]0x4E0B+[char]0x8F7D+[char]0x5668+'.exe'); Move-Item -LiteralPath $src -Destination $dst -Force; Write-Host ('OK -> ' + $dst)"
 if errorlevel 1 goto failed

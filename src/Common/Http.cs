@@ -390,9 +390,6 @@ namespace TomatoBiquga
             string userAgent = null, string accept = null)
         {
             var tmp = Path.Combine(Path.GetTempPath(), "tb_" + Guid.NewGuid().ToString("N") + ".html");
-            // 状态码单独写一个文件：-w 是写到 stdout 的，而这里 stdout 已经被用来
-            // 兜住 curl 的进度/报错了，混在一起会让解析变脆。
-            var codeFile = tmp + ".code";
             try
             {
                 var args = new StringBuilder();
@@ -414,21 +411,25 @@ namespace TomatoBiquga
                     args.Append(" --data-binary \"").Append(body.Replace("\"", "\\\"")).Append('"');
                 }
                 args.Append(" -o \"").Append(tmp).Append('"');
-                // 状态码：-w 往 stdout 写，把整条命令的 stdout 重定向到 codeFile。
-                // 不能用第二个 -o —— 那会把响应体写过去、把 -o tmp 覆盖掉。
+                // 状态码走 -w（curl 把它写到 stdout），响应体走 -o（写进文件）。
+                // ★ 绝不可以用 `> 文件` 这种 shell 重定向：UseShellExecute=false 时
+                //   ProcessStartInfo 是**直接启动 curl.exe**，不经过 cmd.exe，
+                //   `>` 会被当成 curl 的参数 → curl 退出码 3（URL 格式错误），
+                //   所有请求全部失败。这个错犯过一次，被联网实测抓出来（见 docs）。
                 args.Append(" -w \"%{http_code}\"");
                 args.Append(" \"").Append(url).Append('"');
 
-                var psi = new ProcessStartInfo(CurlPath, args.ToString() + " > \"" + codeFile + "\"")
+                var psi = new ProcessStartInfo(CurlPath, args.ToString())
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                 };
+                string stdout;
                 using (var p = Process.Start(psi))
                 {
-                    p.StandardOutput.ReadToEnd();
+                    stdout = p.StandardOutput.ReadToEnd();
                     var err = p.StandardError.ReadToEnd();
                     if (!p.WaitForExit((TimeoutSeconds + 15) * 1000))
                     {
@@ -440,7 +441,7 @@ namespace TomatoBiquga
                 }
 
                 if (!File.Exists(tmp)) throw new Exception("curl 没有产生输出文件");
-                LastStatusCode = ReadStatusCode(codeFile);
+                LastStatusCode = ParseHttpCode(stdout);
                 var bytes = File.ReadAllBytes(tmp);
                 if (bytes.Length == 0) throw new Exception("curl 返回空内容");
                 return Decode(bytes);
@@ -448,21 +449,40 @@ namespace TomatoBiquga
             finally
             {
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-                try { if (File.Exists(codeFile)) File.Delete(codeFile); } catch { }
             }
         }
 
-        /// <summary>读 curl 写出的状态码。读不到/格式不对一律当成 0（未知），不抛异常。</summary>
-        private static int ReadStatusCode(string path)
+        /// <summary>
+        /// 从 curl 的 stdout 里解出 HTTP 状态码。
+        ///
+        /// curl 的 `-w "%{http_code}"` 把状态码写到 stdout，响应体则由 `-o` 写进文件，
+        /// 所以正常情况下 stdout 就是裸的 "200"。
+        /// 但要容忍两种意外（都实测见过）：
+        ///   · 跟随重定向时可能出现多段数字，例如 "200000000" —— 取**最后一段**三位数；
+        ///   · 老 curl 不认 %{http_code} 时会原样吐出字面量，这时按"未知(0)"处理。
+        /// 解不出来一律返回 0（未知），绝不因为状态码解析失败就让请求失败 ——
+        /// 状态码只是"锦上添花"的判断依据，正文才是结果。
+        /// </summary>
+        internal static int ParseHttpCode(string stdout)
         {
-            try
-            {
-                if (!File.Exists(path)) return 0;
-                var s = File.ReadAllText(path).Trim();
-                int code;
-                if (int.TryParse(s, out code) && code >= 100 && code < 600) return code;
-            }
-            catch { }
+            if (string.IsNullOrEmpty(stdout)) return 0;
+            var s = stdout.Trim();
+            if (s.Length == 0) return 0;
+
+            // 从右往左找第一段连续数字，取它最后三位（重定向链会拼在一起）
+            int end = -1;
+            for (int i = s.Length - 1; i >= 0; i--)
+                if (char.IsDigit(s[i])) { end = i; break; }
+            if (end < 0) return 0;
+            int start = end;
+            while (start > 0 && char.IsDigit(s[start - 1])) start--;
+
+            var run = s.Substring(start, end - start + 1);
+            // 三段以上的数字串（重定向拼接）：取最后三位
+            if (run.Length > 3) run = run.Substring(run.Length - 3);
+
+            int code;
+            if (int.TryParse(run, out code) && code >= 100 && code < 600) return code;
             return 0;
         }
 

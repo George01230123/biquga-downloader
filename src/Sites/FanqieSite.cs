@@ -219,8 +219,11 @@ namespace TomatoBiquga
                         book.Category = GetStr(page, "category");
                         book.Status = GetStr(page, "creationStatus") == "1" ? "已完结" : "连载中";
 
-                        // 封面：番茄给的是 https://p*.byteimg.com/… 绝对地址
+                        // 封面：番茄的字段名是 thumbUri / thumbUrl（实测 2026-10 的详情页里
+                        // 两个都在，thumbUri 是站内相对路径风格、thumbUrl 是绝对地址）。
+                        // audioThumbUrl / coverUrl 是给别的书型留的兜底，实测没命中。
                         var cover = GetStr(page, "thumbUrl");
+                        if (string.IsNullOrEmpty(cover)) cover = GetStr(page, "thumbUri");
                         if (string.IsNullOrEmpty(cover)) cover = GetStr(page, "audioThumbUrl");
                         if (string.IsNullOrEmpty(cover)) cover = GetStr(page, "coverUrl");
                         if (!string.IsNullOrEmpty(cover))

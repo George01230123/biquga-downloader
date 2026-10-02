@@ -133,6 +133,7 @@ namespace TomatoBiquga
                 TestHtmlTools();
                 TestTextCleaner();
                 TestDirCacheKeyFor();
+                TestDirCacheRoundTrip();
                 TestSanitizeDesc();
                 TestResolvePaths(work);
                 TestBuildHeader();
@@ -157,6 +158,7 @@ namespace TomatoBiquga
                 TestVolumeGrouping(work);
                 TestVolumeGroupingExact(work);
                 TestRateLimitMarkers();
+                TestParseHttpCode();
                 // 简繁转换（字表全部内联，无外部数据文件）
                 TestZhConvert();
                 TestZhConvertLi();
@@ -366,6 +368,82 @@ namespace TomatoBiquga
                 DirCache.KeyFor(new BookInfo { Site = "fanqie", BookId = "7256784068786785336", Dir = "/45_45710/" }));
             Eq("KeyFor fanqie 不取 Dir", "7256784068786785336",
                 DirCache.KeyFor(new BookInfo { Site = "fanqie", BookId = "7256784068786785336", Dir = "/1_1/" }));
+        }
+
+        /// <summary>
+        /// 目录缓存的往返：**封面地址与字数也必须存下来**。
+        ///
+        /// 为什么专门测这个：这两个字段是后加的，而 `CachedBook` 当时没跟着加 ——
+        /// 后果是"第一次下载有封面，第二次（走目录缓存）就没封面了"，
+        /// 而且**没有任何报错**，只是封面悄悄消失。这类"字段漏存"的问题
+        /// 只能靠往返断言抓。
+        ///
+        /// 注意：DirCache 的目录固定在 exe 同目录的 cache\，所以这里写完会**删掉**自己造的
+        /// 那两个文件 —— 离线单测的约定是不留下垃圾（不能污染 dist\cache）。
+        /// </summary>
+        private static void TestDirCacheRoundTrip()
+        {
+            // 用不可能与真实书冲突的 key
+            const string site = "biquga-m";
+            const string key = "0_0-cachetest";
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cache", site + "_" + key + ".json");
+
+            try
+            {
+                var book = new BookInfo
+                {
+                    Site = site, Dir = "/0_0-cachetest", Title = "缓存往返测试", Author = "作者",
+                    Category = "玄幻", Status = "连载中", Desc = "简介",
+                    Url = "https://m.biquga.com/0_0/",
+                    CoverUrl = "https://www.biquga.com/img/10333.jpg",
+                    WordCount = 2120892,
+                };
+                book.Chapters.Add(new ChapterInfo { Id = "1", Title = "第一章", Order = 0 });
+                book.Chapters.Add(new ChapterInfo { Id = "v", Title = "第一卷", IsVolume = true, Order = 1 });
+                book.Chapters.Add(new ChapterInfo { Id = "2", Title = "第二章", Order = 2 });
+
+                Eq("缓存往返：KeyFor 与测试用 key 一致", key, DirCache.KeyFor(book));
+
+                DirCache.Save(book);
+                // 注意 OfflineTests 的 Check 只有两个参数（名字 + 条件），
+                // 详情要拼进名字里 —— 加了个第三参数会直接编译不过（踩过一次）。
+                Check("缓存往返：文件已写出（" + path + "）", File.Exists(path));
+
+                var back = DirCache.Load(site, key);
+                Check("缓存往返：能读回来", back != null);
+                if (back != null)
+                {
+                    Eq("缓存往返：书名", "缓存往返测试", back.Title);
+                    Eq("缓存往返：作者", "作者", back.Author);
+                    Eq("缓存往返：章数（含分卷行）", 3, back.Chapters.Count);
+                    Eq("缓存往返：分卷标记保留", true, back.Chapters[1].IsVolume);
+
+                    // ★ 这两条就是这次要钉住的
+                    Eq("缓存往返：封面地址不丢", "https://www.biquga.com/img/10333.jpg", back.CoverUrl);
+                    Eq("缓存往返：字数不丢", 2120892L, back.WordCount);
+                }
+
+                // 老缓存文件（没有 coverUrl/wordCount 字段）必须能安全读出来，不能抛异常
+                File.WriteAllText(path,
+                    "{\"site\":\"biquga-m\",\"title\":\"老缓存\",\"dir\":\"/0_0-cachetest\"," +
+                    "\"chapters\":[{\"id\":\"1\",\"title\":\"第一章\",\"vol\":false}]}",
+                    new UTF8Encoding(false));
+                var old = DirCache.Load(site, key);
+                Check("缓存往返：老格式（无封面/字数字段）能读", old != null && old.Chapters.Count == 1);
+                if (old != null)
+                {
+                    Eq("缓存往返：老格式封面为空而不是炸", "", old.CoverUrl);
+                    Eq("缓存往返：老格式字数为 0", 0L, old.WordCount);
+                }
+
+                // 损坏文件 → null，不抛
+                File.WriteAllText(path, "{ 这不是 json ", new UTF8Encoding(false));
+                Check("缓存往返：损坏文件返回 null 不抛异常", DirCache.Load(site, key) == null);
+            }
+            finally
+            {
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+            }
         }
 
         // ============================================================
@@ -2197,6 +2275,43 @@ namespace TomatoBiquga
             var text = File.ReadAllText(md, Encoding.UTF8);
             Eq("分组回归：Markdown 卷标题 3 个", 3, CountOf(text, "\n## 第"));
             Eq("分组回归：Markdown 章节标题 12 个", 12, CountOf(text, "\n### "));
+        }
+
+        /// <summary>
+        /// curl 状态码解析（`-w "%{http_code}"` 的输出）。
+        ///
+        /// 背景：这个函数是为了修一个**联网才暴露出来的严重 bug** ——
+        /// 为了让状态码落到单独文件，我原来在命令行末尾拼了 `> "codeFile"`。
+        /// 但 `UseShellExecute = false` 时 `ProcessStartInfo` 是**直接启动 curl.exe**、
+        /// 不经过 cmd.exe，所以 `>` 从来没被当成重定向，而是被当成 curl 的参数 →
+        /// **每一次请求都返回 curl 退出码 3（URL 格式错误）**，
+        /// 也就是整个程序完全不能用。离线单测全绿也发现不了它，因为它只在"真发请求"时出现。
+        ///
+        /// 现在改成从 stdout 读（curl 把 -w 的输出写 stdout，响应体由 -o 写文件）。
+        /// 这里把各种形状的 stdout 都钉住。
+        /// </summary>
+        private static void TestParseHttpCode()
+        {
+            Eq("状态码：普通 200", 200, Http.ParseHttpCode("200"));
+            Eq("状态码：带换行", 200, Http.ParseHttpCode("200\r\n"));
+            Eq("状态码：前后有空白", 404, Http.ParseHttpCode("  404  "));
+            Eq("状态码：429 限流", 429, Http.ParseHttpCode("429"));
+            Eq("状态码：503", 503, Http.ParseHttpCode("503"));
+            Eq("状态码：403", 403, Http.ParseHttpCode("403"));
+            // 跟随重定向时 curl 可能把多段状态码拼在一起（实测见过 "200000000"）
+            Eq("状态码：重定向拼接 200000000 → 取最后三位", 0, Http.ParseHttpCode("200000000"));
+            Eq("状态码：两段拼接 301200 → 取最后三位", 200, Http.ParseHttpCode("301200"));
+            Eq("状态码：带前缀文字", 200, Http.ParseHttpCode("code=200"));
+            // 老 curl 不认 %{http_code} 时会原样吐字面量 → 必须当成"未知"，不能瞎猜
+            Eq("状态码：字面量 → 未知(0)", 0, Http.ParseHttpCode("%{http_code}"));
+            Eq("状态码：空串 → 0", 0, Http.ParseHttpCode(""));
+            Eq("状态码：null → 0", 0, Http.ParseHttpCode(null));
+            Eq("状态码：没有数字 → 0", 0, Http.ParseHttpCode("abc"));
+            // 这些是"解析不出来"的情况，解析失败绝不能抛异常 ——
+            // 状态码只是锦上添花的判据，正文才是结果
+            Eq("状态码：000（curl 连接失败）→ 0", 0, Http.ParseHttpCode("000"));
+            Eq("状态码：99 不合法 → 0", 0, Http.ParseHttpCode("99"));
+            Eq("状态码：600 不合法 → 0", 0, Http.ParseHttpCode("600"));
         }
 
         // ============================================================

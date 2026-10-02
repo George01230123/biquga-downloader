@@ -49,6 +49,11 @@ namespace TomatoBiquga
             public string dir { get; set; }
             public string bookId { get; set; }
             public string savedAt { get; set; }
+            // 封面与字数也要缓存：否则"目录缓存命中"的那次载入会把它们丢成空，
+            // 表现为"第一次下载有封面、第二次（走缓存）就没封面了"。
+            // 老缓存文件里没有这两个字段 → 反序列化后为 null/0，是安全的降级。
+            public string coverUrl { get; set; }
+            public long wordCount { get; set; }
             public List<CachedChapter> chapters { get; set; }
         }
 
@@ -74,6 +79,8 @@ namespace TomatoBiquga
                     Url = cb.url,
                     Dir = cb.dir,
                     BookId = cb.bookId,
+                    CoverUrl = cb.coverUrl ?? "",
+                    WordCount = cb.wordCount,
                 };
                 int i = 0;
                 foreach (var c in cb.chapters)
@@ -126,6 +133,8 @@ namespace TomatoBiquga
                     dir = book.Dir,
                     bookId = book.BookId,
                     savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                    coverUrl = book.CoverUrl,
+                    wordCount = book.WordCount,
                     chapters = new List<CachedChapter>(),
                 };
                 foreach (var c in book.Chapters)
