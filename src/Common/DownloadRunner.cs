@@ -83,6 +83,18 @@ namespace TomatoBiquga
             if (!Directory.Exists(BookDir))
                 throw new Exception("创建目录失败：" + BookDir + "（可能没有写入权限）");
 
+            // 每本书从零开始算限流账：上一本被限流不该拖累这一本，
+            // 否则下载完一本被限流的书之后，后面每本都会以 1 线程爬。
+            Http.ResetThrottle();
+
+            // 封面：趁现在有详情页 URL 可以当 Referer（防盗链），落到书目录里，
+            // 之后导出 EPUB 就不用再联网。失败不影响正文。
+            if (!string.IsNullOrEmpty(Book.CoverUrl))
+            {
+                try { CoverFetcher.Ensure(Book.CoverUrl, BookDir, Book.Url, Log); }
+                catch { /* Ensure 内部已经兜住了，这里只是双保险 */ }
+            }
+
             // 计数器与列表每次都从零开始（同一个 runner 对象被复用也不会串数据）
             Ok = Skipped = Failed = FromCacheCount = 0;
             SkippedChapters.Clear();
@@ -295,6 +307,11 @@ namespace TomatoBiquga
                 if (!string.IsNullOrEmpty(text)) FromCacheCount++;
                 else text = Site.LoadChapter(Book, c, null);
 
+                // 繁简转换（可选）：放在这里而不是落盘前，是因为**内存里的正文也要跟着转** ——
+                // 「导出 EPUB / Markdown」直接用 c.Text，如果只在写 txt 时转，
+                // 就会出现「txt 是繁体、epub 是简体」这种自相矛盾的结果。
+                text = ApplyScript(text);
+
                 if (string.IsNullOrEmpty(text) || text.Length < 40)
                 {
                     Skipped++;
@@ -443,6 +460,23 @@ namespace TomatoBiquga
         /// </summary>
         /// <summary>输出文件编码（站点配置里可设为 gbk；默认 utf-8 带 BOM）</summary>
         public Encoding OutputEncoding = new UTF8Encoding(true);
+
+        /// <summary>
+        /// 输出繁体：把抓到的正文转成繁体再落盘/导出。
+        /// 默认 false —— 站点正文绝大多数本来就是简体，只有港台读者需要开。
+        /// </summary>
+        public bool OutputTraditional = false;
+
+        /// <summary>
+        /// 按设置做繁简转换。转换表缺失（ZhConvert 不可用）时原样返回，
+        /// 绝不因为转换问题让正文写不出去。
+        /// </summary>
+        private string ApplyScript(string text)
+        {
+            if (!OutputTraditional || string.IsNullOrEmpty(text)) return text;
+            try { return ZhConvert.ToTraditional(text); }
+            catch { return text; }
+        }
 
         public bool AppendToExistingFile;
 

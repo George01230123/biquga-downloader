@@ -31,6 +31,13 @@ namespace TomatoBiquga
         /// <summary>失败章节自动重试轮数：整本下完后，只对失败的那几章再跑一遍</summary>
         public int RetryPasses = 1;
 
+        /// <summary>
+        /// 输出繁体：写盘时把正文从简体转成繁体（港台读者/阅读器用）。
+        /// 为什么放在全局设置而不是站点参数：这是**读者偏好**，跟数据来自哪个站无关 ——
+        /// 同一本书换个源，用户想要的还是繁体。
+        /// </summary>
+        public bool OutputTraditional = false;
+
         public static string DefaultPath
         {
             get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, FileName); }
@@ -63,6 +70,17 @@ namespace TomatoBiquga
                         if (eq <= 0) continue;
                         var k = t.Substring(0, eq).Trim().ToLowerInvariant();
                         var v = t.Substring(eq + 1).Trim();
+
+                        // 布尔键先判：它们的值是 true/false，走 int.TryParse 会全部被丢掉
+                        if (k == "outputtraditional")
+                        {
+                            bool b;
+                            if (bool.TryParse(v, out b)) s.OutputTraditional = b;
+                            else if (v == "1") s.OutputTraditional = true;
+                            else if (v == "0") s.OutputTraditional = false;
+                            continue;
+                        }
+
                         int n;
                         if (!int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) continue;
                         s.Set(k, n);
@@ -126,6 +144,8 @@ namespace TomatoBiquga
             sb.AppendLine("MaxDelayMs=" + MaxDelayMs);
             sb.AppendLine("CrawlTimeoutMinutes=" + CrawlTimeoutMinutes);
             sb.AppendLine("RetryPasses=" + RetryPasses);
+            sb.AppendLine("# OutputTraditional=true 时，写盘/导出会把正文转成繁体（本地转换，不联网）");
+            sb.AppendLine("OutputTraditional=" + (OutputTraditional ? "true" : "false"));
             try
             {
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));

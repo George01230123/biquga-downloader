@@ -109,6 +109,15 @@ namespace TomatoBiquga
             if (string.IsNullOrEmpty(book.Desc))
                 book.Desc = CleanDesc(Http.StripTags(FirstGroup(html, "<div class=\"desc[^\"]*\">([\\s\\S]*?)</div>", "")));
 
+            // 封面：og:image 优先，退回详情页第一张 book 图（PC 版常见 /files/article/image/…）
+            var cover = FirstGroup(html, "og:image\" content=\"([^\"]*)\"", "");
+            if (string.IsNullOrEmpty(cover))
+                cover = FirstGroup(html, "og:novel:image\" content=\"([^\"]*)\"", "");
+            if (string.IsNullOrEmpty(cover))
+                cover = FirstGroup(html, "<img[^>]+(?:data-src|src)=\"([^\"]*(?:cover|image|files)[^\"]*)\"", "");
+            if (!string.IsNullOrEmpty(cover))
+                book.CoverUrl = CoverFetcher.Absolutize(cover, book.Url);
+
             // 起始点 = 最后一章：详情页的章节列表里，最新的一章排在最前面。
             // 站点详情页只列最新/最早各 100 章，这里取“最后一章”，然后顺着 prev 往回走。
             var seq = new List<string>();

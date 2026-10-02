@@ -23,16 +23,36 @@ namespace TomatoBiquga
         /// <summary>写一本 EPUB。chapters 里 Text 为空的章节会被跳过（未下载的章）。</summary>
         public static void Write(string path, BookInfo book, IList<ChapterInfo> chapters, byte[] coverBytes, string coverExt)
         {
+            Write(path, book, chapters, coverBytes, coverExt, null);
+        }
+
+        /// <summary>
+        /// 写一本 EPUB，并**按分卷分组目录**。
+        ///
+        /// volumeTitles：与 chapters 一一对应，非 null 表示"这一项是卷标题"。
+        /// 为什么单独给一个参数：ChapterInfo.IsVolume 只在**全量目录**里有意义，
+        /// 而导出时传进来的往往是"已经下载了正文的那些章"（分卷行被过滤掉了），
+        /// 这时靠单看 chapters 已经推不出卷边界了。所以由调用方把原始信息带进来。
+        /// 传 null 就是不分卷（和不带这个参数的重载一样）。
+        /// </summary>
+        public static void Write(string path, BookInfo book, IList<ChapterInfo> chapters,
+            byte[] coverBytes, string coverExt, IList<string> volumeTitles)
+        {
             if (string.IsNullOrEmpty(path)) throw new ArgumentException("path 不能为空");
             if (book == null) throw new ArgumentException("book 不能为空");
             if (chapters == null) throw new ArgumentException("chapters 不能为空");
 
             var items = new List<ChapterInfo>();
-            foreach (var c in chapters)
+            var vols = new List<string>();
+            for (int i = 0; i < chapters.Count; i++)
             {
+                var c = chapters[i];
                 if (c == null || c.IsVolume) continue;
                 if (string.IsNullOrEmpty(c.Text)) continue;
                 items.Add(c);
+                string v = null;
+                if (volumeTitles != null && i < volumeTitles.Count) v = volumeTitles[i];
+                vols.Add(string.IsNullOrEmpty(v) ? null : v.Trim());
             }
             if (items.Count == 0) throw new Exception("这本书还没有任何已下载的正文，先下载再导出 EPUB。");
 
@@ -67,8 +87,8 @@ namespace TomatoBiquga
                     AddText(zip, name, ChapterXhtml(book, items[i]), CompressionLevel.Optimal);
                 }
 
-                // 4) 目录（nav）
-                AddText(zip, "OEBPS/nav.xhtml", NavXhtml(book, items, names), CompressionLevel.Optimal);
+                // 4) 目录（nav）—— 有分卷就按卷嵌套
+                AddText(zip, "OEBPS/nav.xhtml", NavXhtml(book, items, names, vols), CompressionLevel.Optimal);
 
                 // 5) 样式
                 AddText(zip, "OEBPS/style.css",
@@ -160,16 +180,95 @@ namespace TomatoBiquga
 
         private static string NavXhtml(BookInfo book, List<ChapterInfo> items, List<string> names)
         {
+            return NavXhtml(book, items, names, null);
+        }
+
+        /// <summary>
+        /// 目录页。vols 里有非空值时就按卷嵌套：
+        ///
+        ///   <ol>
+        ///     <li><span>第一卷 …</span><ol><li><a>第一章</a></li>…</ol></li>
+        ///     <li><a>第 N 章</a></li>            ← 卷外的散章
+        ///   </ol>
+        ///
+        /// 为什么不给卷生成单独的 xhtml 页面：EPUB3 的 nav 允许用 &lt;span&gt; 表示
+        /// "不可跳转的分组节点"，阅读器会把它当层级标题显示。生成一个只有一行标题的
+        /// 页面反而会在翻页时多出一页空白。
+        /// </summary>
+        private static string NavXhtml(BookInfo book, List<ChapterInfo> items, List<string> names, List<string> vols)
+        {
+            // 先按卷把章节切成若干段。
+            //
+            // 正确做法分两步，别把两步揉进一个循环：
+            //   1) 先把每章的"有效卷名"算出来（章没写卷名就沿用上一个卷）；
+            //   2) 再把"有效卷名相同"的连续章节折叠成一组。
+            //
+            // 踩过的坑：第一版在单循环里"遇到卷名就另起一组"，结果**每章各开一组**，
+            // 生成的目录变成"每章前面挂一个卷标题"（12 章 → 12 个卷标题），
+            // 而扁平目录模式下所有断言都还是绿的 —— 是 tests/E2E.cs 里
+            // "同一卷的 4 章必须在同一个 <li> 里"这条断言把它抓出来的。
+            var eff = new string[items.Count];
+            string carry = null;
+            for (int i = 0; i < items.Count; i++)
+            {
+                var v = (vols != null && i < vols.Count) ? vols[i] : null;
+                if (!string.IsNullOrEmpty(v)) carry = v.Trim();
+                eff[i] = carry;
+            }
+
+            var groups = new List<KeyValuePair<string, List<int>>>();
+            for (int i = 0; i < items.Count; i++)
+            {
+                var key = eff[i];
+                // 与上一组同名（含"都还没有卷"）就并进去，否则开新组
+                if (groups.Count == 0 || groups[groups.Count - 1].Key != key)
+                    groups.Add(new KeyValuePair<string, List<int>>(key, new List<int>()));
+                groups[groups.Count - 1].Value.Add(i);
+            }
+
             var sb = new StringBuilder();
             // nav.xhtml 在 OEBPS 根下 → style.css 是同层
             sb.Append(Head(book.Title + " - 目录", "style.css"));
             sb.Append("<body>\n");
             sb.Append("  <nav epub:type=\"toc\" id=\"toc\">\n    <h1>目录</h1>\n    <ol>\n");
-            for (int i = 0; i < items.Count; i++)
-                sb.Append("      <li><a href=\"").Append(X(names[i].Substring("OEBPS/".Length)))
-                  .Append("\">").Append(X(ChapterTitle(items[i]))).Append("</a></li>\n");
+
+            bool anyVolume = false;
+            foreach (var g in groups) if (g.Key != null) { anyVolume = true; break; }
+
+            if (!anyVolume)
+            {
+                // 没有分卷信息：保持原来的扁平目录，输出和以前逐字节一致
+                for (int i = 0; i < items.Count; i++)
+                    sb.Append("      <li><a href=\"").Append(X(HrefOf(names[i])))
+                      .Append("\">").Append(X(ChapterTitle(items[i]))).Append("</a></li>\n");
+            }
+            else
+            {
+                foreach (var g in groups)
+                {
+                    if (g.Key == null)
+                    {
+                        foreach (var i in g.Value)
+                            sb.Append("      <li><a href=\"").Append(X(HrefOf(names[i])))
+                              .Append("\">").Append(X(ChapterTitle(items[i]))).Append("</a></li>\n");
+                        continue;
+                    }
+                    sb.Append("      <li><span>").Append(X(g.Key)).Append("</span>\n        <ol>\n");
+                    foreach (var i in g.Value)
+                        sb.Append("          <li><a href=\"").Append(X(HrefOf(names[i])))
+                          .Append("\">").Append(X(ChapterTitle(items[i]))).Append("</a></li>\n");
+                    sb.Append("        </ol>\n      </li>\n");
+                }
+            }
+
             sb.Append("    </ol>\n  </nav>\n</body>\n</html>\n");
             return sb.ToString();
+        }
+
+        /// <summary>OEBPS/ 前缀在 nav.xhtml 里要去掉（它自己就在 OEBPS 根下）</summary>
+        private static string HrefOf(string name)
+        {
+            return name.StartsWith("OEBPS/", StringComparison.Ordinal) ? name.Substring("OEBPS/".Length) : name;
         }
 
         private static string ChapterXhtml(BookInfo book, ChapterInfo c)

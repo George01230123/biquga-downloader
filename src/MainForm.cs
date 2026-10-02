@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -46,6 +47,10 @@ namespace TomatoBiquga
         private Button btnExportEpub;       // 导出 EPUB
         private Button btnExportMd;         // 导出 Markdown
         private Button btnFillMissing;      // 补齐缺章
+        private Button btnShelf;            // 本地书架（下载记录 + 一键追更）
+        private Button btnQueue;            // 任务队列（一次下多本）
+        private Button btnCheckUpdate;      // 检查更新
+        private CheckBox chkTraditional;    // 输出繁体（繁简转换）
 
         /// <summary>把分隔条位置夹到合法范围内（窗口还很小的时候尤其重要）</summary>
         private void ClampSplitter()
@@ -106,7 +111,9 @@ namespace TomatoBiquga
             //    · 最小窗口 820x600 时所有控件必须完整可见（有 _layoutprobe 与离线单测守着）
             // ============================================================
 
-            var top = new Panel { Dock = DockStyle.Top, Height = 68, Padding = new Padding(10, 6, 10, 4) };
+            // 高度 = 各行高度之和 + 上下内边距。
+            // 行1 32 + 行2 30 + 行4 30 = 92，加 Padding(10,6,10,4) 的 10 → 102。
+            var top = new Panel { Dock = DockStyle.Top, Height = 102, Padding = new Padding(10, 6, 10, 4) };
             var row1 = _row1 = new FlowLayoutPanel
             {
                 Dock = DockStyle.Top, Height = 32, WrapContents = false,
@@ -178,6 +185,43 @@ namespace TomatoBiquga
 
             row2.Controls.AddRange(new Control[] { lblOut, outHost, btnBrowse, btnSettings, chkOffline });
 
+            // 第 4 行（固定显示）：书架 / 任务队列 / 检查更新 / 繁简转换。
+            // 为什么不塞进第 2 行：最小窗口 820px 时第 2 行可用宽只有 780px，
+            // 现有内容已经占约 700px，再塞 4 个控件必然越界（有布局断言守着）。
+            var row4 = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top, Height = 30, WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 3, 0, 0),
+            };
+            btnShelf = MakeButton("书架", 44, (s, e) => DoOpenShelf(), 2);
+            new ToolTip().SetToolTip(btnShelf,
+                "打开本地书架：列出下载过的书，可以一键「更新新章节」、导出、打开目录。\n" +
+                "记录存在 exe 同目录的 " + Bookshelf.FileName + "（可手改）。");
+            btnQueue = MakeButton("任务队列", 60, (s, e) => DoOpenQueue(), 2);
+            new ToolTip().SetToolTip(btnQueue,
+                "一次排多本书依次下载（每行一个书名或站点链接）。\n" +
+                "适合睡前挂机：走的是和单个下载完全相同的流程，失败了也不影响后面的书。");
+            btnCheckUpdate = MakeButton("检查更新", 60, (s, e) => DoCheckUpdate(), 8);
+
+            // 繁简转换：转换在**写盘时**做，所以 TXT / EPUB / Markdown 都会跟着变。
+            chkTraditional = new CheckBox
+            {
+                Text = "输出繁体",
+                AutoSize = true,
+                Margin = new Padding(0, 3, 0, 0),
+            };
+            new ToolTip().SetToolTip(chkTraditional,
+                "把导出的正文从简体转成繁体（港台阅读器/读者用）。\n" +
+                "转换在本地完成，不联网；对已经下载好的书重新导出即可生效。");
+            chkTraditional.CheckedChanged += (s, e) =>
+            {
+                _settings.OutputTraditional = chkTraditional.Checked;
+                try { _settings.Save(); } catch { /* 存不下不影响本次导出 */ }
+                Log(chkTraditional.Checked ? "输出繁体：已开启（导出时转换）" : "输出繁体：已关闭");
+            };
+
+            row4.Controls.AddRange(new Control[] { btnShelf, btnQueue, btnCheckUpdate, chkTraditional });
+
             // 第 3 行：番茄专用（平时整行隐藏，切到「番茄小说」才出现）
             //   —— 这几个按钮在老代码里被硬编码在 x=700/876，正是被切掉/盖住文字的那批
             var row3 = new FlowLayoutPanel
@@ -200,7 +244,9 @@ namespace TomatoBiquga
             tip.SetToolTip(btnCoreSetup, "指定第三方番茄下载器的 exe 位置（番茄下载靠它完成）");
             row3.Controls.AddRange(new Control[] { btnWebSearch, btnOfficial, btnCoreSetup });
 
-            // 注意顺序：Dock=Top 是按添加顺序从外往内排的
+            // 注意顺序：Dock=Top 是按添加顺序从外往内排的。
+            // row4 永远显示，放在最外侧；row3 只有番茄站点才显示。
+            top.Controls.Add(row4);
             top.Controls.Add(row3);
             top.Controls.Add(row2);
             top.Controls.Add(row1);
@@ -486,8 +532,8 @@ namespace TomatoBiquga
                     // 高度必须等于「各行高度之和 + 上下 Padding」，否则最下面一行会被裁掉一半。
                     // 注意：隐藏时控件的 Height 会变成 0，所以这里用固定行高常量算，
                     // 不能读 _rowFanqie.Height（第一版就栽在这上面，探针报"下边被切掉"）。
-                    const int Row1H = 32, Row2H = 30, Row3H = 30;
-                    int rows = Row1H + Row2H + (fanqie ? Row3H : 0);
+                    const int Row1H = 32, Row2H = 30, Row3H = 30, Row4H = 30;
+                    int rows = Row1H + Row2H + Row4H + (fanqie ? Row3H : 0);
                     topPanel.Height = rows + topPanel.Padding.Top + topPanel.Padding.Bottom;
                 }
                 // 注意：本方法在构造函数里就会被调用，那时窗口句柄还没创建，
@@ -663,6 +709,10 @@ namespace TomatoBiquga
         {
             Http.Configure(_settings.MinDelayMs, _settings.MaxDelayMs);
 
+            // 繁简开关：从设置回填到界面（设置对话框/ini 改过之后要同步勾选状态）
+            if (chkTraditional != null && chkTraditional.Checked != _settings.OutputTraditional)
+                chkTraditional.Checked = _settings.OutputTraditional;
+
             // 站点级参数（站点配置.ini）优先于全局设置：联网参数（并发/间隔/超时/重试/UA）按站点走，
             // 这样"某个站点被限速要调慢"不用动全局。文件不存在时用内置默认值。
             var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(_site));
@@ -689,6 +739,98 @@ namespace TomatoBiquga
             if (site is FanqieSite) return "fanqie";
             if (site is BiqugaMobileSite) return "biquga-m";
             return "biquga";
+        }
+
+        // ============================================================
+        //  书架 / 任务队列 / 检查更新
+        // ============================================================
+
+        /// <summary>按站点 key 建一个能用的 ISite（书架追更时用：那时候没有界面上下文）</summary>
+        internal static ISite MakeSite(string siteKey)
+        {
+            if (string.Equals(siteKey, "fanqie", StringComparison.OrdinalIgnoreCase)) return new FanqieSite();
+            if (string.Equals(siteKey, "biquga", StringComparison.OrdinalIgnoreCase)) return new BiqugaSite();
+            return new BiqugaMobileSite();
+        }
+
+        /// <summary>把当前这本书记进书架（下载/更新成功后调用）</summary>
+        private void RememberInShelf(BookInfo book, string filePath, bool downloaded)
+        {
+            try
+            {
+                if (book == null || string.IsNullOrEmpty(book.Title)) return;
+                var shelf = Bookshelf.Load();
+                shelf.Touch(book, filePath, book.Chapters != null ? book.Chapters.Count : 0, downloaded);
+                if (!shelf.Save())
+                    Log("提示：书架写入失败（目录可能不可写），不影响下载结果。");
+            }
+            catch (Exception ex)
+            {
+                Log("提示：记书架时出错（不影响下载）：" + ex.Message);
+            }
+        }
+
+        /// <summary>「书架」：列出下载过的书，支持一键追更/导出/打开目录。</summary>
+        private void DoOpenShelf()
+        {
+            using (var dlg = new BookshelfDialog(this))
+            {
+                dlg.ShowDialog(this);
+            }
+        }
+
+        /// <summary>「任务队列」：粘贴多本书名，依次下载。</summary>
+        private void DoOpenQueue()
+        {
+            if (_busy) { BusyNotice("任务队列"); return; }
+            using (var dlg = new QueueDialog(this))
+            {
+                dlg.ShowDialog(this);
+            }
+        }
+
+        /// <summary>「检查更新」：问 GitHub 有没有新版本。只提示，不自动替换自己。</summary>
+        private void DoCheckUpdate()
+        {
+            if (_busy) { BusyNotice("检查更新"); return; }
+            if (!SuppressDialogs) btnCheckUpdate.Enabled = false;
+            RunBackground("正在检查更新…", () =>
+            {
+                var r = UpdateChecker.Check(Log);
+                UiInvoke(() =>
+                {
+                    lblStatus.Text = r.Ok
+                        ? (r.HasUpdate ? "发现新版本 " + r.Latest : "已是最新版本")
+                        : "检查更新失败";
+                    if (!SuppressDialogs) btnCheckUpdate.Enabled = true;
+                });
+
+                if (SuppressDialogs) return;
+                if (r.Ok && !r.HasUpdate)
+                {
+                    MessageBox.Show(string.Format("当前已是最新版本（{0}）。", r.Current),
+                        "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                var text = r.Ok
+                    ? string.Format("发现新版本！\n\n当前版本：{0}\n最新版本：{1}\n\n更新说明：\n{2}\n\n要打开下载页吗？",
+                        r.Current, r.Latest,
+                        string.IsNullOrWhiteSpace(r.Notes) ? "（这次发布没有写说明）" : r.Notes)
+                    : r.Message;
+                var cap = r.Ok ? "发现新版本" : "检查更新失败";
+                var icon = r.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning;
+
+                if (!r.Ok)
+                {
+                    MessageBox.Show(text, cap, MessageBoxButtons.OK, icon);
+                    return;
+                }
+                if (MessageBox.Show(text, cap, MessageBoxButtons.YesNo, icon) == DialogResult.Yes)
+                {
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(r.DownloadUrl) { UseShellExecute = true }); }
+                    catch (Exception ex) { Log("打不开浏览器：" + ex.Message + "\n请手动访问：" + r.DownloadUrl); }
+                }
+            });
         }
 
         /// <summary>取当前站点该用的输出编码（站点配置里可指定 gbk）</summary>
@@ -1237,6 +1379,7 @@ namespace TomatoBiquga
                 Log = Log,
                 RetryPasses = _settings.RetryPasses,
                 OutputEncoding = CurrentFileEncoding(),
+                OutputTraditional = _settings.OutputTraditional,
                 IsCanceled = () => _cancel,
                 OnProgress = (done, total) =>
                 {
@@ -1409,6 +1552,7 @@ namespace TomatoBiquga
                     RetryPasses = _settings.RetryPasses,
                     AppendToExistingFile = true,
                     CumulativeOkCount = startCumulative,
+                    OutputTraditional = _settings.OutputTraditional,
                     IsCanceled = () => _cancel,
                     OnProgress = (n, total) => UiInvoke(() =>
                     {
@@ -1470,12 +1614,26 @@ namespace TomatoBiquga
             try
             {
                 Cursor = Cursors.WaitCursor;
-                EpubWriter.Write(epubPath, book, chapters, null, null);
+
+                // 封面：优先用书目录里已经抓好的图（下载阶段落的），
+                // 没有就趁现在有网补抓一次。两条路都失败也只是没封面，不影响导出。
+                // 注意 C# 5：不能写 out var，必须先把变量声明出来。
+                string coverExt;
+                var coverBytes = CoverFetcher.Read(bookDir, out coverExt);
+                if (coverBytes == null && !string.IsNullOrEmpty(book.CoverUrl))
+                {
+                    var p = CoverFetcher.Ensure(book.CoverUrl, bookDir, book.Url, Log);
+                    if (p != null) coverBytes = CoverFetcher.Read(bookDir, out coverExt);
+                }
+
+                EpubWriter.Write(epubPath, book, chapters, coverBytes, coverExt, VolumeTitlesFor(book, chapters));
                 var size = new FileInfo(epubPath).Length;
-                Log(string.Format("EPUB 已生成：{0}（{1:N0} 字节，{2} 章）", epubPath, size, chapters.Count));
+                Log(string.Format("EPUB 已生成：{0}（{1:N0} 字节，{2} 章{3}）", epubPath, size, chapters.Count,
+                    coverBytes != null ? "，含封面" : "，无封面"));
                 if (!SuppressDialogs)
-                    MessageBox.Show(string.Format("EPUB 导出完成！\n\n章节数：{0}\n文件大小：{1:N0} 字节（{2:N2} MB）\n\n文件位置：\n{3}",
-                        chapters.Count, size, size / 1048576.0, epubPath), "导出 EPUB",
+                    MessageBox.Show(string.Format("EPUB 导出完成！\n\n章节数：{0}\n文件大小：{1:N0} 字节（{2:N2} MB）\n封面：{3}\n\n文件位置：\n{4}",
+                        chapters.Count, size, size / 1048576.0,
+                        coverBytes != null ? "有" : "无（站点没提供或抓取失败）", epubPath), "导出 EPUB",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
@@ -1486,6 +1644,57 @@ namespace TomatoBiquga
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally { Cursor = Cursors.Default; }
+        }
+
+        /// <summary>
+        /// 算出导出用的「卷标题」列表：与 chapters **一一对应**，
+        /// 第 i 项 = 第 i 章所属的卷名（null = 不属于任何卷）。
+        ///
+        /// 为什么要从 book.Chapters 反推：导出时传进来的 chapters 可能只包含
+        /// 「已经下载了正文的章」，分卷行（IsVolume）早被过滤掉了；
+        /// 而 vol 标记本身是加在**分卷行自己**身上的，所以必须回原始目录去找
+        /// 「这一章之前最近的那个分卷行是哪一卷」。
+        ///
+        /// 匹配方式：按 Id 建索引（Id 是站点给的稳定标识，比标题可靠）。
+        /// 找不到对应关系（比如是从 txt 反向解析出来的、Id 是空的）就返回全 null，
+        /// 效果等于不分卷 —— 宁可目录平一点，也不要按错误的卷去分组。
+        /// </summary>
+        private static List<string> VolumeTitlesFor(BookInfo book, List<ChapterInfo> chapters)
+        {
+            if (book == null || book.Chapters == null || chapters == null) return null;
+
+            // 第一遍：原始目录里，每章 → 它属于哪一卷。
+            // 同时按标题建一份索引当兜底：从 txt 反向解析出来的章节有可能拿不到 Id
+            // （旧文件、手工拼的文件），那时只能靠标题认。
+            var owner = new Dictionary<string, string>();
+            var ownerByTitle = new Dictionary<string, string>();
+            string current = null;
+            bool anyVolume = false;
+            foreach (var c in book.Chapters)
+            {
+                if (c == null) continue;
+                if (c.IsVolume) { current = c.Title; anyVolume = true; continue; }
+                if (current == null) continue;
+                if (!string.IsNullOrEmpty(c.Id) && !owner.ContainsKey(c.Id)) owner[c.Id] = current;
+                var t = (c.Title ?? "").Trim();
+                if (t.Length > 0 && !ownerByTitle.ContainsKey(t)) ownerByTitle[t] = current;
+            }
+            if (!anyVolume) return null;
+
+            // 第二遍：按传进来的 chapters 顺序取
+            var result = new List<string>(chapters.Count);
+            foreach (var c in chapters)
+            {
+                string v = null;
+                if (c != null)
+                {
+                    if (!string.IsNullOrEmpty(c.Id)) owner.TryGetValue(c.Id, out v);
+                    if (v == null && !string.IsNullOrEmpty(c.Title))
+                        ownerByTitle.TryGetValue(c.Title.Trim(), out v);
+                }
+                result.Add(v);
+            }
+            return result;
         }
 
         /// <summary>
@@ -1535,6 +1744,7 @@ namespace TomatoBiquga
                     RootDir = root,
                     Log = Log,
                     OutputEncoding = CurrentFileEncoding(),
+                    OutputTraditional = _settings.OutputTraditional,
                     OnProgress = (n, total) => UiInvoke(() =>
                     {
                         progress.Minimum = 0;
@@ -1592,7 +1802,7 @@ namespace TomatoBiquga
             try
             {
                 Cursor = Cursors.WaitCursor;
-                MarkdownWriter.Write(mdPath, book, chapters, true);
+                MarkdownWriter.Write(mdPath, book, chapters, true, VolumeTitlesFor(book, chapters));
                 var size = new FileInfo(mdPath).Length;
                 Log(string.Format("Markdown 已生成：{0}（{1:N0} 字节，{2} 章）", mdPath, size, chapters.Count));
                 if (!SuppressDialogs)
@@ -1677,6 +1887,11 @@ namespace TomatoBiquga
             Log("保存位置：" + runner.OutputFile);
             if (runner.Failed > 0) Log("失败的章节可重新勾选后再下一次（已下载内容会覆盖为完整版本）。");
             if (!string.IsNullOrEmpty(runner.ReportFile)) Log("缺失章节明细：" + runner.ReportFile);
+
+            // 记进书架：下次可以直接在这里一键追更，不用重新搜书名。
+            // 放在这里（而不是每个下载入口）是因为所有下载路径最后都会走到这个方法。
+            if (runner.Book != null && !string.IsNullOrEmpty(runner.OutputFile))
+                RememberInShelf(runner.Book, runner.OutputFile, true);
             try
             {
                 var fi = new FileInfo(runner.OutputFile);
@@ -1802,6 +2017,451 @@ namespace TomatoBiquga
                 else a();
             }
             catch { /* 窗口关闭中 */ }
+        }
+
+        /// <summary>
+        /// 输入是不是"直接可用的地址/标识"而不是书名。
+        /// 认这几种：
+        ///   https://www.biquga.com/10_10333/      → biquga，dir=/10_10333
+        ///   /10_10333  或  10_10333              → biquga，dir=/10_10333
+        ///   https://fanqienovel.com/page/123456  → 番茄，bookId=123456
+        ///   123456（纯数字，番茄站点下）          → 番茄，bookId=123456
+        /// </summary>
+        internal static bool LooksLikeAddress(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            var t = s.Trim();
+            if (t.IndexOf("://", StringComparison.Ordinal) >= 0) return true;
+            if (Regex.IsMatch(t, @"^/?\d+_\d+/?$")) return true;              // biquga 的 dir
+            if (Regex.IsMatch(t, @"^\d{6,}$")) return true;                  // 番茄 book_id
+            if (Regex.IsMatch(t, @"fanqienovel\.com|biquga\.com", RegexOptions.IgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>把地址解析成一个"可以直接 LoadBook 的" BookInfo。认不出来返回 null。</summary>
+        private static BookInfo FromAddress(string s)
+        {
+            var t = (s ?? "").Trim();
+
+            // 番茄：链接里的 /page/<id>，或者纯数字 id
+            var fm = Regex.Match(t, @"fanqienovel\.com/(?:page|book)/(\d+)", RegexOptions.IgnoreCase);
+            if (fm.Success)
+                return new BookInfo { Site = "fanqie", BookId = fm.Groups[1].Value, Url = FanqieSite.Origin + "/page/" + fm.Groups[1].Value };
+            if (Regex.IsMatch(t, @"^\d{6,}$"))
+                return new BookInfo { Site = "fanqie", BookId = t, Url = FanqieSite.Origin + "/page/" + t };
+
+            // 笔趣阁：/10_10333 这种目录形式
+            var bm = Regex.Match(t, @"(\d+_\d+)");
+            if (bm.Success)
+            {
+                var dir = "/" + bm.Groups[1].Value;
+                return new BookInfo { Site = "biquga-m", Dir = dir, Url = BiqugaMobileSite.Host + dir + "/" };
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 给对话框（书架/队列）用的入口：把一段工作丢到后台跑，并写主窗口的日志。
+        /// 做成一个方法而不是让对话框直接摸 Log/RunBackground：
+        /// 那两个是 private，而且对话框不该关心主窗口的内部结构。
+        /// </summary>
+        internal void RunQueueFromDialog(string status, System.Collections.Generic.List<string> keywords)
+        {
+            var canceled = new Func<bool>(() => _cancel);
+            RunBackground(status, () => RunQueue(keywords, Log, canceled));
+        }
+
+        /// <summary>
+        /// 对话框请求停止队列。走的是主窗口既有的取消标志，
+        /// 所以「取消」按钮、关窗口、队列对话框里的停止是同一套语义。
+        /// </summary>
+        internal void RequestCancelFromDialog()
+        {
+            _cancel = true;
+        }
+
+        /// <summary>
+        /// 「任务队列」的逐本下载。界面部分在 QueueDialog，
+        /// 真正的活在主窗口这里 —— 因为下载要用主窗口的站点对象、日志、进度条和设置。
+        ///
+        /// 单本失败不影响后面的书（catch 住继续），这是挂机场景的硬要求：
+        /// 睡前排 5 本，不能因为第 2 本站点抽风就整晚只下了一本。
+        /// </summary>
+        private void RunQueue(System.Collections.Generic.List<string> keywords, Action<string> log, Func<bool> canceled)
+        {
+            int n = keywords.Count;
+            for (int i = 0; i < n; i++)
+            {
+                if (canceled()) break;
+                var kw = keywords[i] == null ? "" : keywords[i].Trim();
+                if (kw.Length == 0) continue;
+
+                try
+                {
+                    log(string.Format("===== 队列 [{0}/{1}]：{2} =====", i + 1, n, kw));
+
+                    // 0) 可能是粘贴进来的地址（书架的追更走的就是这条路），
+                    //    那就别去搜索 —— 直接构造出书籍标识。
+                    BookInfo target = null;
+                    if (LooksLikeAddress(kw))
+                    {
+                        target = FromAddress(kw);
+                        if (target != null) log("  按地址直接载入：《" + target.Title + "》");
+                    }
+
+                    // 1) 找书
+                    if (target == null)
+                    {
+                        var found = _site.Search(kw, log);
+                        if (found == null || found.Count == 0)
+                        {
+                            log("  没搜到这本书，跳过。");
+                            continue;
+                        }
+                        target = found[0];
+                        if (found.Count > 1) log(string.Format("  搜到 {0} 条，取第一条：《{1}》", found.Count, target.Title));
+                    }
+
+                    // 2) 目录
+                    if (canceled()) break;
+                    var book = _site.LoadBook(target, log);
+                    if (book == null || book.Chapters == null || book.Chapters.Count == 0)
+                    {
+                        log("  目录为空，跳过。");
+                        continue;
+                    }
+
+                    // 3) 只下没下过的章（续传语义，重复排同一本不会重头再下）
+                    var todo = new System.Collections.Generic.List<ChapterInfo>();
+                    foreach (var c in book.Chapters)
+                    {
+                        if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
+                        if (string.IsNullOrEmpty(c.Text)) todo.Add(c);
+                    }
+
+                    string root = txtOutput.Text.Trim();
+                    if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
+                    string bookDir, txtPath;
+                    DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+                    bool append = File.Exists(txtPath);
+
+                    if (todo.Count == 0 && append)
+                    {
+                        log("  已经是最新的，没有新章节。");
+                        RememberInShelf(book, txtPath, false);
+                        continue;
+                    }
+                    if (todo.Count == 0) todo.AddRange(book.Chapters);
+
+                    // 4) 下载
+                    var runner = new DownloadRunner
+                    {
+                        Site = _site,
+                        Book = book,
+                        Chapters = todo,
+                        RootDir = root,
+                        Log = log,
+                        RetryPasses = _settings.RetryPasses,
+                        OutputEncoding = CurrentFileEncoding(),
+                        OutputTraditional = _settings.OutputTraditional,
+                        AppendToExistingFile = append,
+                        IsCanceled = canceled,
+                    };
+                    runner.Run();
+                    log(string.Format("  完成：成功 {0} 章，跳过 {1} 章，失败 {2} 章",
+                        runner.Ok, runner.Skipped, runner.Failed));
+                    if (!string.IsNullOrEmpty(runner.OutputFile)) RememberInShelf(book, runner.OutputFile, true);
+                }
+                catch (Exception ex)
+                {
+                    // 单本失败继续下一本：这是队列的核心价值，不能因为一本就整体中断
+                    log(string.Format("  这本书失败，继续下一本：{0}", ex.Message));
+                }
+            }
+            log("===== 队列结束 =====");
+        }
+    }
+
+    /// <summary>
+    /// 「任务队列」对话框：粘贴多行书名，依次下载。
+    ///
+    /// 为什么直接复用主窗口的 RunQueue 而不是自己实现一遍下载：
+    /// 项目里「界面 / 命令行自测」共用同一套 DownloadRunner 是既有原则
+    /// （见 docs/架构.md），队列再写一套必然会出现"队列下出来的和手动下的不一样"。
+    /// </summary>
+    internal class QueueDialog : Form
+    {
+        private readonly MainForm _owner;
+        private readonly TextBox _input;
+        private readonly Button _run, _close;
+        private readonly Label _hint;
+
+        public QueueDialog(MainForm owner)
+        {
+            _owner = owner;
+            Text = "任务队列 —— 依次下载多本书";
+            FormBorderStyle = FormBorderStyle.Sizable;
+            StartPosition = FormStartPosition.CenterParent;
+            MinimizeBox = false;
+            ClientSize = new Size(560, 340);
+            MinimumSize = new Size(480, 280);
+
+            _hint = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 52,
+                Padding = new Padding(10, 8, 10, 0),
+                Text = "每行一本（书名，或番茄书籍链接）。\n" +
+                       "站点用主窗口上选的站点；也可以在某行前加前缀指定，例如「番茄：书名」或「biquga：书名」。\n" +
+                       "已有章节会自动跳过（不会重下），单本失败不影响后面的书。",
+            };
+
+            _input = new TextBox
+            {
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Dock = DockStyle.Fill,
+                Font = new Font("Consolas", 9.5F),
+            };
+            WatermarkExt.SetHint(_input, "牧神记\r\n全职高手\r\n番茄：某本番茄的书", this);
+
+            var bar = new Panel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(10, 6, 10, 6) };
+            _run = new Button { Text = "开始排队下载", AutoSize = true, Dock = DockStyle.Right };
+            _run.Click += (s, e) => StartRun();
+            _close = new Button { Text = "关闭", AutoSize = true, Dock = DockStyle.Right };
+            _close.Click += (s, e) => Close();
+            bar.Controls.Add(_close);
+            bar.Controls.Add(_run);
+
+            Controls.Add(_input);
+            Controls.Add(_hint);
+            Controls.Add(bar);
+            CancelButton = _close;
+
+            // 用户关窗口 = 请求停止队列（当前这本下完就停）。用 FormClosing 而不是按钮点击，
+            // 这样点右上角 ×、按 Alt+F4、按 Esc 三条路都能停 —— 否则"关掉了还在后台下"
+            // 是最容易让人困惑的行为。
+            // _submitted 用来区分两种关闭：用户关（要停）vs 点「开始」后程序自己关（不能停）。
+            FormClosing += (s, e) =>
+            {
+                if (_running && !_submitted) _owner.RequestCancelFromDialog();
+            };
+        }
+
+        private bool _running;
+        private bool _submitted;
+
+        private void StartRun()
+        {
+            var kw = new System.Collections.Generic.List<string>();
+            foreach (var raw in _input.Lines)
+            {
+                var line = raw == null ? "" : raw.Trim();
+                if (line.Length > 0) kw.Add(line);
+            }
+            if (kw.Count == 0)
+            {
+                MessageBox.Show(this, "请先粘贴至少一本书名（每行一本）。", "任务队列",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // 站点前缀：允许「番茄：书名」「biquga：书名」覆盖主窗口的选择。
+            // 做法是先切主窗口的站点下拉框，这样 RunQueue 里用的 _site 就是对的。
+            var first = kw[0];
+            int sep = first.IndexOf(':');
+            if (sep < 0) sep = first.IndexOf('：');
+            if (sep > 0)
+            {
+                var prefix = first.Substring(0, sep).Trim();
+                int idx = SiteIndexForPrefix(prefix);
+                if (idx >= 0) _owner.SelectSiteForTest(idx);
+            }
+
+            _run.Enabled = false;
+            _running = true;
+            _submitted = true;      // 先打标记再 Close()，否则 FormClosing 会把队列当场取消
+            _hint.Text = "正在排队下载…… 关闭本窗口会请求停止（当前这本下完就停）。";
+            Close();
+
+            // 交给主窗口跑：它已经有日志区、进度条和设置。
+            // 这里用 BeginInvoke 是为了先让对话框关掉、界面刷新一下再开始。
+            _owner.BeginInvoke(new Action(() => _owner.RunQueueFromDialog("队列下载中…", kw)));
+        }
+
+        private static int SiteIndexForPrefix(string prefix)
+        {
+            if (string.IsNullOrEmpty(prefix)) return -1;
+            var p = prefix.Trim().ToLowerInvariant();
+            if (p == "番茄" || p == "fanqie" || p == "tomato") return 0;
+            if (p == "biquga" || p == "笔趣阁" || p == "biquga-m" || p == "移动版") return 1;
+            if (p == "biquga-pc" || p == "pc" || p == "pc版") return 2;
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// 「书架」对话框：列出下载过的书，一键追更。
+    ///
+    /// 数据来自 exe 同目录的 书架.json（见 Bookshelf.cs）。追更时重新载入目录，
+    /// 然后走和主界面「更新新章节」完全相同的路径（RunQueue 里的那段逻辑），
+    /// 所以"书架追更"和"手动更新"结果一致。
+    /// </summary>
+    internal class BookshelfDialog : Form
+    {
+        private readonly MainForm _owner;
+        private readonly ListView _list;
+        private readonly Button _update, _open, _remove, _refresh, _close;
+        private Bookshelf _shelf;
+
+        public BookshelfDialog(MainForm owner)
+        {
+            _owner = owner;
+            Text = "本地书架 —— 下载过的书";
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(760, 420);
+            MinimumSize = new Size(600, 320);
+
+            _list = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = true,
+                MultiSelect = false,
+                HideSelection = false,
+            };
+            _list.Columns.Add("书名", 260);
+            _list.Columns.Add("作者", 120);
+            _list.Columns.Add("站点", 110);
+            _list.Columns.Add("章数", 70);
+            _list.Columns.Add("上次下载", 130);
+            _list.DoubleClick += (s, e) => DoUpdate();
+
+            var bar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 42,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(10, 7, 10, 6),
+                WrapContents = false,
+            };
+            _update = new Button { Text = "更新新章节", AutoSize = true };
+            _update.Click += (s, e) => DoUpdate();
+            _open = new Button { Text = "打开目录", AutoSize = true };
+            _open.Click += (s, e) => DoOpenFolder();
+            _remove = new Button { Text = "从书架移除", AutoSize = true };
+            _remove.Click += (s, e) => DoRemove();
+            _refresh = new Button { Text = "刷新", AutoSize = true };
+            _refresh.Click += (s, e) => Reload();
+            _close = new Button { Text = "关闭", AutoSize = true };
+            _close.Click += (s, e) => Close();
+            bar.Controls.AddRange(new Control[] { _update, _open, _remove, _refresh, _close });
+
+            Controls.Add(_list);
+            Controls.Add(bar);
+            CancelButton = _close;
+            Reload();
+        }
+
+        private void Reload()
+        {
+            _shelf = Bookshelf.Load();
+            _list.BeginUpdate();
+            _list.Items.Clear();
+            foreach (var e in _shelf.Sorted())
+            {
+                var it = new ListViewItem(e.Title);
+                it.SubItems.Add(string.IsNullOrEmpty(e.Author) ? "未知" : e.Author);
+                it.SubItems.Add(SiteLabel(e.Site));
+                it.SubItems.Add(e.LastChapterCount.ToString());
+                it.SubItems.Add(e.LastDownload == DateTime.MinValue ? "—" : e.LastDownload.ToString("yyyy-MM-dd HH:mm"));
+                it.Tag = e;
+                _list.Items.Add(it);
+            }
+            _list.EndUpdate();
+
+            if (_list.Items.Count == 0)
+            {
+                _list.Items.Add(new ListViewItem("（书架还是空的 —— 下载一本书之后就会自动记进来）"));
+            }
+        }
+
+        private static string SiteLabel(string key)
+        {
+            if (string.Equals(key, "fanqie", StringComparison.OrdinalIgnoreCase)) return "番茄小说";
+            if (string.Equals(key, "biquga", StringComparison.OrdinalIgnoreCase)) return "笔趣阁 PC";
+            if (string.Equals(key, "biquga-m", StringComparison.OrdinalIgnoreCase)) return "笔趣阁 移动";
+            return key;
+        }
+
+        private Bookshelf.Entry Selected
+        {
+            get
+            {
+                if (_list.SelectedItems.Count == 0) return null;
+                return _list.SelectedItems[0].Tag as Bookshelf.Entry;
+            }
+        }
+
+        private void DoOpenFolder()
+        {
+            var e = Selected;
+            if (e == null) { MessageBox.Show(this, "请先在列表里选一本书。", "书架"); return; }
+            try
+            {
+                var dir = string.IsNullOrEmpty(e.FilePath) ? null : Path.GetDirectoryName(e.FilePath);
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
+                {
+                    MessageBox.Show(this, "找不到这本书的目录（可能已经被移动或删除）。", "书架",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "打开目录失败：" + ex.Message, "书架");
+            }
+        }
+
+        private void DoRemove()
+        {
+            var e = Selected;
+            if (e == null) { MessageBox.Show(this, "请先在列表里选一本书。", "书架"); return; }
+            if (MessageBox.Show(this, "只从书架移除记录，**不会删除已下载的文件**。\n\n确定移除《" + e.Title + "》？",
+                    "书架", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            _shelf.Remove(e.Site, e.Key);
+            _shelf.Save();
+            Reload();
+        }
+
+        /// <summary>追更：重新拉目录 → 只补新章节。复用主窗口的队列下载逻辑。</summary>
+        private void DoUpdate()
+        {
+            var e = Selected;
+            if (e == null) { MessageBox.Show(this, "请先在列表里选一本书。", "书架"); return; }
+            if (_owner == null || _owner.IsDisposed) return;
+
+            // 不能直接用书名搜：站点上可能有重名书，搜出来的第一条未必是这本。
+            // 有详情页地址时优先用它（biquga 的记录一定带 Url，番茄带 book_id）。
+            var key = !string.IsNullOrEmpty(e.Url) ? e.Url : e.Key;
+            if (string.IsNullOrEmpty(key))
+            {
+                MessageBox.Show(this, "这条记录里没有可用的地址，请用主界面重新搜一次这本书。", "书架");
+                return;
+            }
+
+            // 把主窗口切到这本书所属的站点，这样 _site / _profile 都是对的
+            int idx = 0;
+            if (string.Equals(e.Site, "biquga", StringComparison.OrdinalIgnoreCase)) idx = 2;
+            else if (string.Equals(e.Site, "biquga-m", StringComparison.OrdinalIgnoreCase)) idx = 1;
+            _owner.SelectSiteForTest(idx);
+
+            _update.Enabled = false;
+            Hide();
+            _owner.BeginInvoke(new Action(() => _owner.RunQueueFromDialog("书架追更中…",
+                new System.Collections.Generic.List<string> { key })));
+            Close();
         }
     }
 

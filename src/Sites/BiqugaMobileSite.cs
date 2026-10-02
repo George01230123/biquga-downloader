@@ -104,6 +104,16 @@ namespace TomatoBiquga
                 desc = CleanDesc(Http.StripTags(FirstGroup(home, "<div class=\"desc[^\"]*\">([\\s\\S]*?)</div>", "")));
             book.Desc = desc;
 
+            // 封面：优先 og:image（站点给的标准字段），退回详情页里第一张书图。
+            // 解析出来是相对地址，统一补成绝对地址。
+            var cover = FirstGroup(home, "og:image\" content=\"([^\"]*)\"", "");
+            if (string.IsNullOrEmpty(cover))
+                cover = FirstGroup(home, "og:novel:image\" content=\"([^\"]*)\"", "");
+            if (string.IsNullOrEmpty(cover))
+                cover = FirstGroup(home, "<img[^>]+(?:data-src|src)=\"([^\"]*(?:cover|image|files)[^\"]*)\"", "");
+            if (!string.IsNullOrEmpty(cover))
+                book.CoverUrl = CoverFetcher.Absolutize(cover, book.Url);
+
             // 目录页：dindex_1 里会列出全部分页（dindex_1..N）
             if (log != null) log("正在读取移动版目录页（每页 100 章，通常十几页就够全本）…");
             var first = Http.Get(Host + dir + "/dindex_1.html", book.Url);

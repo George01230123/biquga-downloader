@@ -24,17 +24,40 @@ namespace TomatoBiquga
         /// </summary>
         public static void Write(string path, BookInfo book, IList<ChapterInfo> chapters, bool includeToc)
         {
+            Write(path, book, chapters, includeToc, null);
+        }
+
+        /// <summary>
+        /// 写一本 Markdown，并**按分卷分组**。
+        ///
+        /// volumeTitles：与 chapters 一一对应，非空表示这一章属于该卷（见
+        /// EpubWriter.Write 的同名参数说明）。全为 null 时输出与不分卷完全一致 ——
+        /// 这一条有断言守着，免得给没分卷的书凭空多出层级。
+        ///
+        /// 分卷时的结构：卷名用 `##`，章节降级成 `###`，目录里用嵌套列表。
+        /// </summary>
+        public static void Write(string path, BookInfo book, IList<ChapterInfo> chapters, bool includeToc,
+            IList<string> volumeTitles)
+        {
             if (string.IsNullOrEmpty(path)) throw new ArgumentException("path 不能为空");
             if (book == null) throw new ArgumentException("book 不能为空");
 
             var items = new List<ChapterInfo>();
-            foreach (var c in chapters)
+            var vols = new List<string>();
+            for (int i = 0; i < chapters.Count; i++)
             {
+                var c = chapters[i];
                 if (c == null || c.IsVolume) continue;
                 if (string.IsNullOrEmpty(c.Text)) continue;
                 items.Add(c);
+                string v = null;
+                if (volumeTitles != null && i < volumeTitles.Count) v = volumeTitles[i];
+                vols.Add(string.IsNullOrEmpty(v) ? null : v.Trim());
             }
             if (items.Count == 0) throw new Exception("这本书还没有任何已下载的正文，先下载再导出 Markdown。");
+
+            bool anyVolume = false;
+            foreach (var v in vols) if (v != null) { anyVolume = true; break; }
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
@@ -47,6 +70,7 @@ namespace TomatoBiquga
             if (!string.IsNullOrEmpty(book.Url)) sb.Append("source: ").Append(Yaml(book.Url)).Append('\n');
             sb.Append("exported: ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")).Append('\n');
             sb.Append("chapters: ").Append(items.Count).Append('\n');
+            if (anyVolume) sb.Append("volumes: ").Append(CountVolumes(vols)).Append('\n');
             sb.Append("generator: novel-downloader\n");
             sb.Append("---\n\n");
 
@@ -61,20 +85,49 @@ namespace TomatoBiquga
             if (includeToc)
             {
                 sb.Append("## 目录\n\n");
+                string lastVol = null;
                 for (int i = 0; i < items.Count; i++)
-                    sb.Append("- [").Append(Escape(ChapterTitle(items[i]))).Append("](#")
-                      .Append(AnchorId(i + 1)).Append(")\n");
+                {
+                    if (anyVolume)
+                    {
+                        var v = vols[i];
+                        if (v != null && v != lastVol)
+                        {
+                            if (lastVol != null) sb.Append('\n');
+                            sb.Append("- **").Append(Escape(v)).Append("**\n");
+                            lastVol = v;
+                        }
+                        sb.Append("  - [").Append(Escape(ChapterTitle(items[i]))).Append("](#")
+                          .Append(AnchorId(i + 1)).Append(")\n");
+                    }
+                    else
+                    {
+                        sb.Append("- [").Append(Escape(ChapterTitle(items[i]))).Append("](#")
+                          .Append(AnchorId(i + 1)).Append(")\n");
+                    }
+                }
                 sb.Append('\n');
             }
 
             sb.Append("---\n");
+            string curVol = null;
             for (int i = 0; i < items.Count; i++)
             {
                 var c = items[i];
                 sb.Append('\n');
+                if (anyVolume)
+                {
+                    var v = vols[i];
+                    if (v != null && v != curVol)
+                    {
+                        curVol = v;
+                        sb.Append("## ").Append(Escape(v)).Append("\n");
+                    }
+                }
                 // 显式 html 锚点：GitHub / Typora / VS Code 都认，保证目录链接点得动
                 sb.Append("<a id=\"").Append(AnchorId(i + 1)).Append("\"></a>\n\n");
-                sb.Append("## ").Append(Escape(ChapterTitle(c))).Append("\n\n");
+                // 有卷层级时章节整体降一级，否则「卷」和「章」都是 ## 会看不出层级
+                sb.Append(anyVolume ? "### " : "## ").Append(Escape(ChapterTitle(c))).Append("\n\n");
                 foreach (var raw in (c.Text ?? "").Split('\n'))
                 {
                     var line = raw.TrimEnd('\r').Trim();
@@ -88,6 +141,18 @@ namespace TomatoBiquga
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
             if (File.Exists(path)) File.Delete(path);
             File.Move(tmp, path);
+        }
+
+        /// <summary>数有几卷（相邻重复只算一次）</summary>
+        private static int CountVolumes(List<string> vols)
+        {
+            int n = 0;
+            string last = null;
+            foreach (var v in vols)
+            {
+                if (v != null && v != last) { n++; last = v; }
+            }
+            return n;
         }
 
         public static string ChapterTitle(ChapterInfo c)

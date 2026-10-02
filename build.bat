@@ -33,7 +33,7 @@ set FLAGS=/nologo /platform:anycpu /optimize+ /codepage:65001 /nowarn:1591,0618
 rem System.IO.Compression[.FileSystem]: needed by the EPUB export (hand-written zip,
 rem zero third-party dependencies).
 set REFS=/r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll
-set COMMON=src\Common\Models.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs src\Common\ChapterIndex.cs src\Common\SiteProfile.cs src\Common\MarkdownWriter.cs
+set COMMON=src\Common\Models.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs src\Common\ChapterIndex.cs src\Common\SiteProfile.cs src\Common\MarkdownWriter.cs src\Common\CoverFetcher.cs src\Common\BookStats.cs src\Common\Bookshelf.cs src\Common\UpdateChecker.cs src\Common\ZhConvert.cs
 set SITES=src\Sites\BiqugaSite.cs src\Sites\BiqugaMobileSite.cs src\Sites\FanqieSite.cs src\Sites\TomatoCore.cs
 
 echo [2/6] Building main program (GUI)...
@@ -65,6 +65,15 @@ rem and asserts that no control overflows its parent or overlaps another one.
 rem The test performs no network access and writes nothing to dist\cache.
 "%CSC%" %FLAGS% /target:exe /main:TomatoBiquga.OfflineTests /out:"dist\_offlinetests.exe" %REFS% ^
  src\AssemblyInfo.cs src\MainForm.cs tests\OfflineTests.cs %COMMON% %SITES%
+if errorlevel 1 goto failed
+
+rem End-to-end integration probe: builds a whole book (volumes + cover + traditional
+rem Chinese) and then RE-OPENS the produced EPUB like a foreign file -- mimetype order,
+rem every XML parsed by XmlDocument, cover bytes present, nav nesting exact.
+rem Why it exists: unit tests were all green while the EPUB nav grouped one volume
+rem per chapter. "Parts pass" does not mean "the produced book is valid".
+"%CSC%" %FLAGS% /target:exe /main:E2E /out:"dist\_e2e.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tests\E2E.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
 echo [5/6] Renaming GUI output (Chinese name, done in PowerShell)...

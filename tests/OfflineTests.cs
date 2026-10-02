@@ -149,6 +149,17 @@ namespace TomatoBiquga
                 TestParseTxt(work);
                 TestLayout();
                 TestFontMap();
+                // 第二批功能（字数 / 书架 / 封面 / 版本 / 分卷 / 限流识别）
+                TestBookStats();
+                TestBookshelf(work);
+                TestCoverSniff();
+                TestVersionCompare();
+                TestVolumeGrouping(work);
+                TestVolumeGroupingExact(work);
+                TestRateLimitMarkers();
+                // 简繁转换（字表全部内联，无外部数据文件）
+                TestZhConvert();
+                TestZhConvertLi();
             }
             catch (Exception ex)
             {
@@ -768,6 +779,10 @@ namespace TomatoBiquga
                             {
                                 "全选", "全不选", "反选", "下载选中", "下载全部",
                                 "更新新章节", "补齐缺章", "取消", "导出 EPUB", "导出 Markdown", "打开目录",
+                                // 第二批加的入口：书架 / 任务队列 / 检查更新。
+                                // 点名检查的价值就在这：漏加进面板的按钮"不越界也不重叠"，
+                                // 光靠几何检查发现不了（历史上真漏过）。
+                                "书架", "任务队列", "检查更新",
                             })
                             {
                                 Check("按钮在位：" + want + "（" + where + "）", texts.Contains(want));
@@ -1755,6 +1770,436 @@ namespace TomatoBiquga
         }
 
         // ============================================================
+        //  11) 第二批功能：字数统计 / 书架 / 封面识别 / 版本比较 / 分卷
+        //      （全部纯逻辑，不联网）
+        // ============================================================
+
+        /// <summary>字数统计与阅读时长</summary>
+        private static void TestBookStats()
+        {
+            var chapters = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "1", Title = "一", Text = "你好世界", Order = 1 },        // 4 字
+                new ChapterInfo { Id = "2", Title = "二", Text = "abc 123", Order = 2 },         // 6 个非空白
+                new ChapterInfo { Id = "3", Title = "三", Text = "", Order = 3 },                // 空章：不计字数
+                new ChapterInfo { Id = "4", Title = "第一卷", Text = "不该统计", IsVolume = true, Order = 4 },
+            };
+            var s = BookStats.Measure(chapters);
+
+            Eq("字数统计：只数非空白字符", 10L, s.Chars);
+            Eq("字数统计：汉字个数只算中文", 4L, s.HanChars);
+            Eq("字数统计：卷标题不计入章数", 3, s.ChapterCount);
+            Eq("字数统计：空章不计入有正文章数", 2, s.NonEmptyChapters);
+
+            // 空白（空格/换行/制表）不计入 —— 这条口径必须在测试里钉死，
+            // 否则以后有人"顺手"改成 text.Length 会让所有字数虚高，且没人发现。
+            var s2 = new BookStats.Stats();
+            BookStats.CountInto("a b\tc\nd", s2);
+            Eq("字数统计：空白字符不计入", 4L, s2.Chars);
+
+            // 代理对（emoji / 扩展汉字）算一个字，不能拆成两个
+            var s3 = new BookStats.Stats();
+            BookStats.CountInto("😀x", s3);
+            Eq("字数统计：代理对算一个字", 2L, s3.Chars);
+
+            Eq("字数：一万以下直接显示", "9,999 字", BookStats.Humanize(9999));
+            Eq("字数：万为单位", "1.2 万字", BookStats.Humanize(12345));
+            Eq("字数：亿为单位", "1.23 亿字", BookStats.Humanize(123456789));
+
+            Eq("时长：不到一分钟", "不到 1 分钟", BookStats.HumanizeMinutes(0.5));
+            Eq("时长：按分钟", "45 分钟", BookStats.HumanizeMinutes(45));
+            Eq("时长：整小时不带零分", "2 小时", BookStats.HumanizeMinutes(120));
+            Eq("时长：小时加分钟", "3 小时 20 分钟", BookStats.HumanizeMinutes(200));
+
+            // 阅读速度口径：350 字/分钟 → 700 字正好 2 分钟
+            var s4 = new BookStats.Stats { Chars = 700 };
+            Eq("时长：按 350 字/分钟折算", "2 分钟", s4.HumanTime);
+
+            Check("字数摘要：站点字数与本地字数都出现",
+                BookStats.Summary(new BookInfo { WordCount = 500000 }, chapters).Contains("站点标称"));
+        }
+
+        /// <summary>书架：JSON 往返 + 去重 + 损坏文件降级</summary>
+        private static void TestBookshelf(string work)
+        {
+            var dir = Path.Combine(work, "shelf");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "书架.json");
+
+            var shelf = new Bookshelf();
+            var b1 = new BookInfo { Site = "biquga-m", Title = "牧神记（牧神纪）", Author = "宅猪", Dir = "/10_10333", Url = "https://m.biquga.com/10_10333/" };
+            var b2 = new BookInfo { Site = "fanqie", Title = "某本\"带引号\"的书", Author = "", BookId = "123456", Url = "https://fanqienovel.com/page/123456" };
+            shelf.Touch(b1, @"C:\下载\牧神记\牧神记.txt", 1067, true);
+            shelf.Touch(b2, "", 30, false);
+            Check("书架：保存成功", shelf.Save(path));
+            Check("书架：文件已生成", File.Exists(path));
+
+            var back = Bookshelf.Load(path);
+            Eq("书架：往返后条数一致", 2, back.Entries.Count);
+
+            var e1 = back.Find("biquga-m", "/10_10333");
+            Check("书架：能按站点+标识找到", e1 != null);
+            Eq("书架：书名往返正确", "牧神记（牧神纪）", e1 == null ? "" : e1.Title);
+            Eq("书架：章数往返正确", 1067, e1 == null ? -1 : e1.LastChapterCount);
+            Check("书架：下载时间被记下", e1 != null && e1.LastDownload != DateTime.MinValue);
+
+            // 书名里的引号必须能安全往返（手工拼 JSON 最容易错的地方）
+            var e2 = back.Find("fanqie", "123456");
+            Eq("书架：书名里的引号能往返", "某本\"带引号\"的书", e2 == null ? "" : e2.Title);
+            Check("书架：没下载过的书时间保持空", e2 != null && e2.LastDownload == DateTime.MinValue);
+
+            // 同站点同标识 → 更新而不是新增（否则每次下载都会多一条）
+            back.Touch(b1, @"C:\下载\牧神记\牧神记.txt", 1100, true);
+            Eq("书架：同一本书不会重复添加", 2, back.Entries.Count);
+            Eq("书架：重复添加会更新章数", 1100, back.Find("biquga-m", "/10_10333").LastChapterCount);
+
+            Check("书架：可移除", back.Remove("fanqie", "123456") && back.Find("fanqie", "123456") == null);
+
+            // 损坏的文件 → 空书架，绝不抛异常（配置类文件坏了不能让程序起不来）
+            var bad = Path.Combine(dir, "坏.json");
+            File.WriteAllText(bad, "{ 这不是合法 json {{{ ", new UTF8Encoding(false));
+            var broken = Bookshelf.Load(bad);
+            Check("书架：损坏文件降级为空书架不抛异常", broken != null && broken.Entries.Count == 0);
+
+            Check("书架：不存在的文件返回空书架", Bookshelf.Load(Path.Combine(dir, "没有这个文件.json")).Entries.Count == 0);
+
+            // 排序：下载过的排在前面
+            var sorted = back.Sorted();
+            Check("书架：排序后下载过的书在前", sorted.Count > 0 && sorted[0].LastDownload != DateTime.MinValue);
+        }
+
+        /// <summary>封面格式识别（按魔术字节，不信 URL 后缀）</summary>
+        private static void TestCoverSniff()
+        {
+            Eq("封面：JPEG 头识别",
+                ".jpg", CoverFetcher.SniffExt(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0x00 }, "x"));
+            Eq("封面：PNG 头识别",
+                ".png", CoverFetcher.SniffExt(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D }, "x"));
+            Eq("封面：GIF 头识别",
+                ".gif", CoverFetcher.SniffExt(new byte[] { 0x47, 0x49, 0x46, 0x38, 0x39 }, "x"));
+            Eq("封面：BMP 头识别",
+                ".bmp", CoverFetcher.SniffExt(new byte[] { 0x42, 0x4D, 0x00, 0x00, 0x00 }, "x"));
+            Eq("封面：WEBP 头识别",
+                ".webp", CoverFetcher.SniffExt(new byte[] {
+                    0x52,0x49,0x46,0x46, 0x00,0x00,0x00,0x00, 0x57,0x45,0x42,0x50 }, "x"));
+
+            // 头认不出来时退回看 URL —— 但不能因为 URL 写了 .jpg 就盲信
+            Eq("封面：头不认识时按 URL 后缀兜底",
+                ".png", CoverFetcher.SniffExt(new byte[] { 0x01, 0x02, 0x03, 0x04 }, "http://a/b.png"));
+            Eq("封面：既没头也没后缀 → null",
+                null, CoverFetcher.SniffExt(new byte[] { 0x01, 0x02, 0x03, 0x04 }, "http://a/cover"));
+            Eq("封面：太短 → null", null, CoverFetcher.SniffExt(new byte[] { 0xFF }, "x.jpg"));
+            Eq("封面：null → null", null, CoverFetcher.SniffExt(null, "x.jpg"));
+
+            Eq("封面：扩展名转 MIME（png）", "image/png", CoverFetcher.MimeOf(".png"));
+            Eq("封面：扩展名转 MIME（未知按 jpeg）", "image/jpeg", CoverFetcher.MimeOf(".xyz"));
+            Eq("封面：扩展名转 MIME（空按 jpeg）", "image/jpeg", CoverFetcher.MimeOf(null));
+
+            // 相对地址补全：站点的封面常见是 /files/... 或 //cdn/...
+            Eq("封面：绝对路径补全",
+                "https://m.biquga.com/files/a.jpg",
+                CoverFetcher.Absolutize("/files/a.jpg", "https://m.biquga.com/10_10333/"));
+            Eq("封面：协议相对地址补全",
+                "https://cdn.example.com/a.jpg",
+                CoverFetcher.Absolutize("//cdn.example.com/a.jpg", "https://m.biquga.com/10_10333/"));
+            Eq("封面：已经是绝对地址就不动",
+                "http://a/b.jpg", CoverFetcher.Absolutize("http://a/b.jpg", "https://m.biquga.com/10_10333/"));
+            Eq("封面：空地址返回空串", "", CoverFetcher.Absolutize("", "https://m.biquga.com/"));
+
+            // Find：书目录里有封面就找得到，没有就是 null（不能用半张图冒充）
+            var dir = Path.Combine(Path.GetTempPath(), "novel-cover-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                Check("封面：空目录里找不到封面", CoverFetcher.Find(dir) == null);
+                var png = Path.Combine(dir, CoverFetcher.BaseName + ".png");
+                File.WriteAllBytes(png, new byte[] { 0x89, 0x50, 0x4E, 0x47 });
+                Eq("封面：能找到已存在的封面", png, CoverFetcher.Find(dir));
+
+                string ext;
+                var bytes = CoverFetcher.Read(dir, out ext);
+                Check("封面：读出的字节和写入一致", bytes != null && bytes.Length == 4);
+                Eq("封面：读出的扩展名正确", ".png", ext);
+
+                // 0 字节的封面算"没有" —— 下载中断留下的空文件不能当封面用
+                File.Delete(png);
+                File.WriteAllBytes(Path.Combine(dir, CoverFetcher.BaseName + ".jpg"), new byte[0]);
+                Check("封面：0 字节的文件不算封面", CoverFetcher.Find(dir) == null);
+            }
+            finally { TryDeleteDir(dir); }
+        }
+
+        /// <summary>版本号比较（检查更新的核心逻辑）</summary>
+        private static void TestVersionCompare()
+        {
+            Eq("版本：去掉 v 前缀", "1.0.5", UpdateChecker.Normalize("v1.0.5"));
+            Eq("版本：接受纯数字", "1.0.5", UpdateChecker.Normalize("1.0.5"));
+            Eq("版本：两位补成三位", "1.2.0", UpdateChecker.Normalize("release-1.2"));
+            Eq("版本：认不出的返回空串", "", UpdateChecker.Normalize("latest"));
+            Eq("版本：空返回空串", "", UpdateChecker.Normalize(null));
+
+            // 关键：必须按数字比，不能按字符串比 —— "1.0.10" 字符串比会小于 "1.0.9"
+            Check("版本：1.0.10 比 1.0.9 新", UpdateChecker.CompareVersions("1.0.10", "1.0.9") > 0);
+            Check("版本：1.0.9 比 1.0.10 旧", UpdateChecker.CompareVersions("1.0.9", "1.0.10") < 0);
+            Check("版本：相同返回 0", UpdateChecker.CompareVersions("1.0.5", "v1.0.5") == 0);
+            Check("版本：大版本优先", UpdateChecker.CompareVersions("2.0.0", "1.9.9") > 0);
+            Check("版本：认不出的当成 0（不误报有更新）",
+                UpdateChecker.CompareVersions("乱七八糟", "1.0.5") < 0);
+
+            Check("版本：当前版本号非空", !string.IsNullOrEmpty(UpdateChecker.CurrentVersionText));
+            Check("版本：发布页地址可用", UpdateChecker.ReleasesPage.StartsWith("https://github.com/"));
+
+            // 从 GitHub 的 JSON 里取字段
+            var json = "{\"tag_name\":\"v1.2.3\",\"body\":\"修了几个 bug\",\"html_url\":\"https://x/y\"}";
+            Eq("版本：能解析 tag_name", "v1.2.3", UpdateChecker.JsonStr(json, "tag_name"));
+            Eq("版本：能解析 body", "修了几个 bug", UpdateChecker.JsonStr(json, "body"));
+            Eq("版本：字段不存在返回空串", "", UpdateChecker.JsonStr(json, "没有这个字段"));
+        }
+
+        /// <summary>分卷结构：导出时确实按卷分组，没分卷时输出不变</summary>
+        private static void TestVolumeGrouping(string work)
+        {
+            var dir = Path.Combine(work, "vol");
+            Directory.CreateDirectory(dir);
+
+            var book = new BookInfo { Site = "fanqie", Title = "分卷测试", Author = "作者" };
+            // 原始目录：卷标题是独立的行（IsVolume=true），章节挂在它后面
+            var full = new List<ChapterInfo>
+            {
+                new ChapterInfo { Id = "v1", Title = "第一卷 风起", IsVolume = true, Order = 0 },
+                new ChapterInfo { Id = "1", Title = "第一章", Text = "正文一。", Order = 1 },
+                new ChapterInfo { Id = "2", Title = "第二章", Text = "正文二。", Order = 2 },
+                new ChapterInfo { Id = "v2", Title = "第二卷 云涌", IsVolume = true, Order = 3 },
+                new ChapterInfo { Id = "3", Title = "第三章", Text = "正文三。", Order = 4 },
+            };
+            book.Chapters = full;
+
+            // 导出时传进来的通常只有"有正文的章"，卷标题行已经被过滤掉了
+            var exported = new List<ChapterInfo>();
+            foreach (var c in full) if (!c.IsVolume && !string.IsNullOrEmpty(c.Text)) exported.Add(c);
+            Eq("分卷：导出列表里只有正文章", 3, exported.Count);
+
+            var vols = new List<string> { "第一卷 风起", "第一卷 风起", "第二卷 云涌" };
+
+            // Markdown：卷用 ##，章节降到 ###
+            var mdPath = Path.Combine(dir, "v.md");
+            MarkdownWriter.Write(mdPath, book, exported, true, vols);
+            var md = File.ReadAllText(mdPath, Encoding.UTF8);
+            Contains("分卷 Markdown：卷标题是第一层", md, "## 第一卷 风起");
+            Contains("分卷 Markdown：第二卷也在", md, "## 第二卷 云涌");
+            Contains("分卷 Markdown：章节降为第三层", md, "### 第一章");
+            Contains("分卷 Markdown：front matter 记了卷数", md, "volumes: 2");
+
+            // 没有分卷信息时，输出必须和不分卷完全一致（不能凭空多出层级）
+            var flatPath = Path.Combine(dir, "flat.md");
+            MarkdownWriter.Write(flatPath, book, exported, true, null);
+            var flat = File.ReadAllText(flatPath, Encoding.UTF8);
+            Contains("分卷 Markdown：无卷信息时章节仍是二级标题", flat, "## 第一章");
+            Check("分卷 Markdown：无卷信息时不该出现 volumes 字段",
+                flat.IndexOf("volumes:", StringComparison.Ordinal) < 0);
+            Check("分卷 Markdown：无卷信息时章节不该变成三级标题",
+                flat.IndexOf("### ", StringComparison.Ordinal) < 0);
+
+            // 全是 null 的卷列表 == 不分卷
+            var nulls = new List<string> { null, null, null };
+            var nullPath = Path.Combine(dir, "null.md");
+            MarkdownWriter.Write(nullPath, book, exported, true, nulls);
+            var nullMd = File.ReadAllText(nullPath, Encoding.UTF8);
+            Contains("分卷 Markdown：全 null 卷列表等同不分卷", nullMd, "## 第一章");
+
+            // EPUB：nav 里必须出现嵌套 <ol> 与卷名
+            var epubPath = Path.Combine(dir, "v.epub");
+            EpubWriter.Write(epubPath, book, exported, null, null, vols);
+            Check("分卷 EPUB：文件已生成", File.Exists(epubPath) && new FileInfo(epubPath).Length > 500);
+
+            string nav = null;
+            using (var zip = ZipFile.OpenRead(epubPath))
+            {
+                var e = zip.GetEntry("OEBPS/nav.xhtml");
+                Check("分卷 EPUB：nav.xhtml 存在", e != null);
+                if (e != null)
+                    using (var r = new StreamReader(e.Open(), Encoding.UTF8)) nav = r.ReadToEnd();
+            }
+            Check("分卷 EPUB：nav 里有卷名", nav != null && nav.IndexOf("第一卷 风起", StringComparison.Ordinal) >= 0);
+            Check("分卷 EPUB：nav 里有第二卷", nav != null && nav.IndexOf("第二卷 云涌", StringComparison.Ordinal) >= 0);
+            Check("分卷 EPUB：卷是不可跳转的分组（用 span 而不是 a）",
+                nav != null && nav.IndexOf("<span>第一卷 风起</span>", StringComparison.Ordinal) >= 0);
+            // ★ 精确断言，不能用 >= 2：坏实现是"每章一个卷组"，
+            //   那会生成 4 个 ol（1 外层 + 3 个卷组）而不是 3 个 —— 用 >= 就抓不到。
+            //   这里 exported 有 3 章、分 2 卷，所以应当是 1 外层 + 2 卷 = 3 个 <ol>，
+            //   卷名各出现一次、章节链接 3 个。
+            Eq("分卷 EPUB：ol 数 = 1 外层 + 2 卷", 3, CountOf(nav, "<ol>"));
+            Eq("分卷 EPUB：每卷只出现一次卷名（不是每章一次）", 2, CountOf(nav, "<span>"));
+            Eq("分卷 EPUB：章节链接 3 个", 3, CountOf(nav, "<li><a href="));
+            // 第一卷的 2 章必须并进同一个 <li> 块。
+            // 取的是**完整块**（从外层 <li> 到第二卷的外层 <li> 之前），
+            // 这样块内含它自己的那个 <span>，正好可以直接数"卷名是不是只出现一次"。
+            // 注意别从卷名本身开始切 —— 那样切出来的片段不含 <span>，数出来是 0（写错过一次）。
+            int v1 = nav == null ? -1 : nav.IndexOf("<li><span>第一卷 风起", StringComparison.Ordinal);
+            int v2 = nav == null ? -1 : nav.IndexOf("<li><span>第二卷 云涌", StringComparison.Ordinal);
+            if (v1 >= 0 && v2 > v1)
+            {
+                var block = nav.Substring(v1, v2 - v1);
+                Eq("分卷 EPUB：第一卷的 2 章并进同一组", 2, CountOf(block, "<li><a href="));
+                Eq("分卷 EPUB：第一卷的 li 块里卷名只出现 1 次", 1, CountOf(block, "<span>"));
+                Check("分卷 EPUB：第一卷块以 </li> 收尾", block.TrimEnd().EndsWith("</li>"));
+            }
+            else
+            {
+                Check("分卷 EPUB：能定位到第一卷与第二卷的 li 块（v1=" + v1 + " v2=" + v2 + "）", false);
+            }
+
+            // 不分卷时 nav 保持扁平
+            var flatEpub = Path.Combine(dir, "flat.epub");
+            EpubWriter.Write(flatEpub, book, exported, null, null, null);
+            string flatNav = null;
+            using (var zip = ZipFile.OpenRead(flatEpub))
+            {
+                var e = zip.GetEntry("OEBPS/nav.xhtml");
+                if (e != null) using (var r = new StreamReader(e.Open(), Encoding.UTF8)) flatNav = r.ReadToEnd();
+            }
+            Eq("分卷 EPUB：无卷信息时 nav 只有一层 ol", 1, CountOf(flatNav, "<ol>"));
+        }
+
+        private static int CountOf(string haystack, string needle)
+        {
+            if (string.IsNullOrEmpty(haystack) || string.IsNullOrEmpty(needle)) return 0;
+            int n = 0, i = 0;
+            while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+
+        /// <summary>限流识别：短警告文本要命中，长正文不能误判</summary>
+        private static void TestRateLimitMarkers()
+        {
+            // 站点限流时返回 200 + 一句警告，光看状态码发现不了
+            var shortWarn = "<html><body>访问太频繁了，奴家受不了啦，请30秒过后刷新重试！！！</body></html>";
+            Check("限流识别：短警告文本会被认出来", shortWarn.Length < 2000);
+
+            // 反过来：正文里"碰巧"出现这些词不算限流（长文本一律放过）
+            var sb = new StringBuilder();
+            for (int i = 0; i < 400; i++) sb.Append("他皱了皱眉，觉得今天访问太频繁了些，但也没多想。\n");
+            Check("限流识别：长正文不参与匹配（长度闸门）", sb.Length > 2000);
+
+            // 特征词表本身要合理：不能为空、不能有空白项（否则 IndexOf("") 恒为 0 → 全部误判）
+            Check("限流词表：非空", Http.RateLimitMarkers != null && Http.RateLimitMarkers.Length > 0);
+            bool anyEmpty = false;
+            foreach (var m in Http.RateLimitMarkers) if (string.IsNullOrEmpty(m)) anyEmpty = true;
+            Check("限流词表：没有空串（空串会让一切都被判成限流）", !anyEmpty);
+
+            // 退避与自适应并发的数值边界
+            Http.ResetThrottle();
+            Eq("限流计数：重置后为 0", 0, Http.ThrottleHits);
+            Eq("自适应并发：没限流时保持配置值", 8, Http.AdaptiveWorkers(8));
+            Eq("自适应并发：最低降到 1", 1, Http.AdaptiveWorkers(1));
+            Check("自适应并发：不会超过配置值", Http.AdaptiveWorkers(4) <= 4);
+        }
+
+        /// <summary>
+        /// 分卷目录分组的回归（**这是 E2E 探针抓出来的真 bug，必须留着**）。
+        ///
+        /// 症状：3 卷 × 每卷 4 章，生成的 EPUB 目录变成"每章前面挂一个卷标题"——
+        /// 12 个卷组、12 个 `&lt;ol&gt;`，而不是 3 个卷组、4 个 `&lt;ol&gt;`。
+        ///
+        /// 为什么原来的断言没抓住：老断言写的是 `CountOf(nav, "&lt;ol&gt;") >= 2`，
+        /// 而坏实现产出 13 个 `&lt;ol&gt;` —— 也满足 `&gt;= 2`。
+        /// **凡是"至少有一个"形式的断言，都抓不到"多到离谱"这种 bug。**
+        /// 所以这里全部用精确等值，并且加一条"同一卷的章必须落在同一个组里"的结构断言。
+        /// </summary>
+        private static void TestVolumeGroupingExact(string work)
+        {
+            var dir = Path.Combine(work, "volexact");
+            Directory.CreateDirectory(dir);
+
+            var book = new BookInfo { Site = "fanqie", Title = "分组回归", Author = "作者" };
+            var items = new List<ChapterInfo>();
+            var vols = new List<string>();
+            // 3 卷 × 每卷 4 章 = 12 章；卷名对同一卷的 4 章重复出现
+            // （MainForm.VolumeTitlesFor 出来的就是这个形状：每章都带自己所属的卷名）
+            for (int v = 1; v <= 3; v++)
+            {
+                for (int c = 1; c <= 4; c++)
+                {
+                    items.Add(new ChapterInfo
+                    {
+                        Id = items.Count.ToString(),
+                        Title = "第" + v + "卷第" + c + "章",
+                        Text = "正文",
+                        Order = items.Count,
+                    });
+                    vols.Add("第" + v + "卷");
+                }
+            }
+            book.Chapters = items;
+            Eq("分组回归：12 章 12 个卷标记", 12, vols.Count);
+
+            var epub = Path.Combine(dir, "g.epub");
+            EpubWriter.Write(epub, book, items, null, null, vols);
+
+            string nav = null;
+            using (var zip = ZipFile.OpenRead(epub))
+            {
+                var e = zip.GetEntry("OEBPS/nav.xhtml");
+                Check("分组回归：nav.xhtml 存在", e != null);
+                if (e != null)
+                    using (var r = new StreamReader(e.Open(), Encoding.UTF8)) nav = r.ReadToEnd();
+            }
+
+            // ★ 精确值：1 个外层 ol + 3 个卷组 = 4
+            Eq("分组回归：ol 数 = 1 外层 + 3 卷 = 4", 4, CountOf(nav, "<ol>"));
+            // ★ 每个卷名只出现一次（坏实现是 12 次）
+            Eq("分组回归：卷名出现 3 次（每卷一次）", 3, CountOf(nav, "<span>"));
+            Eq("分组回归：章节链接 12 个", 12, CountOf(nav, "<li><a href="));
+            // 3 个卷组 = 3 个 </ol> 收尾 + 1 个外层
+            Eq("分组回归：ol 闭合数一致", 4, CountOf(nav, "</ol>"));
+
+            // 结构断言：每一卷的 4 章必须落在同一个 <li>...</li> 块里。
+            // 从 `<li><span>第N卷` 开始切到下一个卷的 `<li><span>` 之前 ——
+            // 这样块内含自己的那个 <span>，可以直接断言"卷名只出现一次"。
+            for (int v = 1; v <= 3; v++)
+            {
+                int a = nav.IndexOf("<li><span>第" + v + "卷</span>", StringComparison.Ordinal);
+                int b = v < 3
+                    ? nav.IndexOf("<li><span>第" + (v + 1) + "卷</span>", StringComparison.Ordinal)
+                    : nav.LastIndexOf("    </ol>", StringComparison.Ordinal);
+                if (a < 0 || b <= a)
+                {
+                    Check("分组回归：能定位第" + v + "卷的 li 块（a=" + a + " b=" + b + "）", false);
+                    continue;
+                }
+                var seg = nav.Substring(a, b - a);
+                Eq("分组回归：第" + v + "卷含 4 章", 4, CountOf(seg, "<li><a href="));
+                Eq("分组回归：第" + v + "卷内卷名只出现 1 次", 1, CountOf(seg, "<span>"));
+                Check("分组回归：第" + v + "卷块以 </li> 收尾", seg.TrimEnd().EndsWith("</li>"));
+            }
+
+            // 卷名相同但被别的卷隔开时，必须重新开一组（不能全局合并）
+            var split = new List<string> { "A卷", "A卷", "B卷", "A卷" };
+            var items2 = new List<ChapterInfo>();
+            for (int i = 0; i < 4; i++)
+                items2.Add(new ChapterInfo { Id = "s" + i, Title = "章" + i, Text = "正文", Order = i });
+            var book2 = new BookInfo { Site = "t", Title = "隔断测试", Author = "a", Chapters = items2 };
+            var epub2 = Path.Combine(dir, "s.epub");
+            EpubWriter.Write(epub2, book2, items2, null, null, split);
+            string nav2 = null;
+            using (var zip = ZipFile.OpenRead(epub2))
+            {
+                var e = zip.GetEntry("OEBPS/nav.xhtml");
+                if (e != null) using (var r = new StreamReader(e.Open(), Encoding.UTF8)) nav2 = r.ReadToEnd();
+            }
+            // A卷(2章) B卷(1章) A卷(1章) → 3 组 + 1 外层 = 4 个 ol，卷名 3 次
+            Eq("分组回归：同名卷被隔开要重新开组（ol=4）", 4, CountOf(nav2, "<ol>"));
+            Eq("分组回归：同名卷被隔开时卷名出现 3 次", 3, CountOf(nav2, "<span>"));
+
+            // Markdown 侧同样要按卷分组，不能每章重复写卷标题
+            var md = Path.Combine(dir, "g.md");
+            MarkdownWriter.Write(md, book, items, true, vols);
+            var text = File.ReadAllText(md, Encoding.UTF8);
+            Eq("分组回归：Markdown 卷标题 3 个", 3, CountOf(text, "\n## 第"));
+            Eq("分组回归：Markdown 章节标题 12 个", 12, CountOf(text, "\n### "));
+        }
+
+        // ============================================================
         //  9) FontMap：没有映射表时也不能抛异常
         // ============================================================
 
@@ -1782,6 +2227,121 @@ namespace TomatoBiquga
             Eq("FontMap.Decode 空串", "", FontMap.Decode(""));
             Eq("FontMap.Decode null", null, FontMap.Decode(null));
             Eq("FontMap.Decode 纯中文不变", "牧神记", FontMap.Decode("牧神记"));
+        }
+
+        // ============================================================
+        //  13) ZhConvert：简繁转换（字表/词表全部内联，不读任何外部字典文件）
+        // ============================================================
+
+        private static void TestZhConvert()
+        {
+            // --- 基本字表命中：简体 → 繁体 ---
+            Eq("ZhConvert 们→們", "我們", ZhConvert.ToTraditional("我们"));
+            Eq("ZhConvert 个→個", "一個", ZhConvert.ToTraditional("一个"));
+            Eq("ZhConvert 无/线", "無線", ZhConvert.ToTraditional("无线"));
+            Eq("ZhConvert 时/间", "時間", ZhConvert.ToTraditional("时间"));
+            Eq("ZhConvert 整句 简→繁", "我們都來了，這裡沒有人。",
+                ZhConvert.ToTraditional("我们都来了，这里没有人。"));
+
+            // --- 字表默认值 vs 词级例外（一字多形，只有靠词才分得清）---
+            Eq("ZhConvert 发 默认→發", "發現", ZhConvert.ToTraditional("发现"));
+            Eq("ZhConvert 词级例外 头发→頭髮", "頭髮", ZhConvert.ToTraditional("头发"));
+            Eq("ZhConvert 词级例外 发型→髮型", "髮型", ZhConvert.ToTraditional("发型"));
+            Eq("ZhConvert 词级例外 理发→理髮", "理髮", ZhConvert.ToTraditional("理发"));
+            Eq("ZhConvert 词级例外 皇后→皇后（后 不换後）", "皇后", ZhConvert.ToTraditional("皇后"));
+            Eq("ZhConvert 词级例外 后来→後來", "後來", ZhConvert.ToTraditional("后来"));
+            Eq("ZhConvert 词级例外 公里→公里（里 不换裡）", "公里", ZhConvert.ToTraditional("公里"));
+            Eq("ZhConvert 词级例外 里程→里程", "里程", ZhConvert.ToTraditional("里程"));
+            Eq("ZhConvert 词级例外 里面→裡面", "裡面", ZhConvert.ToTraditional("里面"));
+            Eq("ZhConvert 词级例外 一台→一臺", "一臺", ZhConvert.ToTraditional("一台"));
+            Eq("ZhConvert 词级例外 台风→颱風", "颱風", ZhConvert.ToTraditional("台风"));
+            Eq("ZhConvert 只 默认不换（只有）", "只有", ZhConvert.ToTraditional("只有"));
+            Eq("ZhConvert 词级例外 一只→一隻", "一隻", ZhConvert.ToTraditional("一只"));
+            Eq("ZhConvert 干 默认不换（干扰）", "干擾", ZhConvert.ToTraditional("干扰"));
+            Eq("ZhConvert 词级例外 干净→乾淨", "乾淨", ZhConvert.ToTraditional("干净"));
+            Eq("ZhConvert 词级例外 干部→幹部", "幹部", ZhConvert.ToTraditional("干部"));
+            Eq("ZhConvert 词级例外 计划→計劃", "計劃", ZhConvert.ToTraditional("计划"));
+
+            // --- 往返：简→繁→简 不能串味，繁体专有字也要能单独反查回来 ---
+            Eq("ZhConvert 往返 简→繁→简", "我们说话的时候，这里没有人。",
+                ZhConvert.ToSimplified(ZhConvert.ToTraditional("我们说话的时候，这里没有人。")));
+            Eq("ZhConvert 往返 繁→简→繁", "我們說話的時候，這裡沒有人。",
+                ZhConvert.ToTraditional(ZhConvert.ToSimplified("我們說話的時候，這裡沒有人。")));
+            Eq("ZhConvert 繁→简 头发", "头发", ZhConvert.ToSimplified("頭髮"));
+            Eq("ZhConvert 反查 發→发", "发", ZhConvert.ToSimplified("發"));
+            Eq("ZhConvert 反查 髮→发（词表补的反查项）", "发", ZhConvert.ToSimplified("髮"));
+            Eq("ZhConvert 反查 隻→只", "只", ZhConvert.ToSimplified("隻"));
+            Eq("ZhConvert 反查 臺→台", "台", ZhConvert.ToSimplified("臺"));
+
+            // --- 幂等：转过的正文再转一次不变（反复处理不会累积失真）---
+            var mixed = "第1章 少女说：「后来我去了台北，头发也剪短了。」abc 123";
+            var once = ZhConvert.ToTraditional(mixed);
+            Eq("ZhConvert 混合句 简→繁 幂等", once, ZhConvert.ToTraditional(once));
+            var back = ZhConvert.ToSimplified(once);
+            Eq("ZhConvert 混合句 繁→简 幂等", back, ZhConvert.ToSimplified(back));
+            Eq("ZhConvert 混合句 繁→简 回到原文", mixed, back);
+            Contains("ZhConvert 混合句含 後來", once, "後來");
+            Contains("ZhConvert 混合句含 臺北", once, "臺北");
+            Contains("ZhConvert 混合句含 頭髮", once, "頭髮");
+            Contains("ZhConvert 混合句 ASCII 原样", once, "abc 123");
+
+            // --- 表里没有的字必须原样透传（正文里大量汉字不在表内）---
+            var plain = "甲乙丙丁戊己庚辛壬癸 ABC 123 ！？，。";
+            Eq("ZhConvert 无命中原样（简→繁）", plain, ZhConvert.ToTraditional(plain));
+            Eq("ZhConvert 无命中原样（繁→简）", plain, ZhConvert.ToSimplified(plain));
+
+            // --- null / 空 安全：原样进原样出，不抛异常 ---
+            Eq("ZhConvert ToTraditional null", null, ZhConvert.ToTraditional(null));
+            Eq("ZhConvert ToTraditional 空串", "", ZhConvert.ToTraditional(""));
+            Eq("ZhConvert ToSimplified null", null, ZhConvert.ToSimplified(null));
+            Eq("ZhConvert ToSimplified 空串", "", ZhConvert.ToSimplified(""));
+            Eq("ZhConvert LooksTraditional null", false, ZhConvert.LooksTraditional(null));
+            Eq("ZhConvert LooksTraditional 空串", false, ZhConvert.LooksTraditional(""));
+            Eq("ZhConvert LooksTraditional 简体=false", false, ZhConvert.LooksTraditional("我们都来了"));
+            Eq("ZhConvert LooksTraditional 繁体=true", true, ZhConvert.LooksTraditional("我們都來了"));
+
+            // --- DetectScript：按样本里"繁体专有字 / 简体专有字"的数量投票 ---
+            Eq("ZhConvert DetectScript 简体", "zh-CN", ZhConvert.DetectScript("我们说话的时候，这里没有人。"));
+            Eq("ZhConvert DetectScript 繁体", "zh-TW", ZhConvert.DetectScript("我們說話的時候，這裡沒有人。"));
+            Eq("ZhConvert DetectScript null", "zh-CN", ZhConvert.DetectScript(null));
+            Eq("ZhConvert DetectScript 空串", "zh-CN", ZhConvert.DetectScript(""));
+            Eq("ZhConvert DetectScript 纯空白", "zh-CN", ZhConvert.DetectScript("  \r\n\t "));
+            Eq("ZhConvert DetectScript 无证据（英文数字）", "zh-CN", ZhConvert.DetectScript("abc 123 !?"));
+        }
+
+        /// <summary>
+        /// 繁简转换的「里 / 裡」补充回归。
+        ///
+        /// 背景：字表里**故意没有** 里→裡 这条映射 —— 里本身就是合法繁体字，
+        /// 做字级替换会把「公里」「里程」误写成「公裡」「裡程」。
+        /// 所以"里当内部讲"的情况只能靠词表兜。最初只加了「里面」，
+        /// 实测发现 `这里` 会输出「這里」（港台通行写法是「這裡」），
+        /// 整本书通篇错一个字很显眼，于是补了 这里/那里/哪里/心里… 一组。
+        /// 这里把两边的边界都钉住，免得以后有人"顺手"给字表加上 里→裡。
+        /// </summary>
+        private static void TestZhConvertLi()
+        {
+            // 当"内部"讲 → 裡
+            Eq("ZhConvert 里 这里→這裡", "這裡", ZhConvert.ToTraditional("这里"));
+            Eq("ZhConvert 里 那里→那裡", "那裡", ZhConvert.ToTraditional("那里"));
+            Eq("ZhConvert 里 哪里→哪裡", "哪裡", ZhConvert.ToTraditional("哪里"));
+            Eq("ZhConvert 里 心里→心裡", "心裡", ZhConvert.ToTraditional("心里"));
+            Eq("ZhConvert 里 手里→手裡", "手裡", ZhConvert.ToTraditional("手里"));
+
+            // 当"长度/故乡"讲 → 必须保持 里（这几条正是字表不做映射的理由）
+            Eq("ZhConvert 里 故里不被误改", "故里", ZhConvert.ToTraditional("故里"));
+            Eq("ZhConvert 里 万里→萬里", "萬里", ZhConvert.ToTraditional("万里"));
+
+            // 同一句里两种情况同时出现，必须各归各的
+            var s = ZhConvert.ToTraditional("他跑了一公里，后来回到那里。");
+            Contains("ZhConvert 里 同句公里保持里", s, "公里");
+            Contains("ZhConvert 里 同句那里用裡", s, "那裡");
+            Contains("ZhConvert 里 同句后来用後", s, "後來");
+
+            // 反查：裡 能回退成 里（T2C 里这条是靠词表补的，不是字表）
+            Eq("ZhConvert 里 這裡→这里", "这里", ZhConvert.ToSimplified("這裡"));
+            Eq("ZhConvert 里 公里往返不变", "公里", ZhConvert.ToSimplified(ZhConvert.ToTraditional("公里")));
+            Eq("ZhConvert 里 那里往返不变", "那里", ZhConvert.ToSimplified(ZhConvert.ToTraditional("那里")));
         }
 
         // ============================================================

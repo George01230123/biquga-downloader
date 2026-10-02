@@ -218,6 +218,18 @@ namespace TomatoBiquga
                         book.Desc = GetStr(page, "abstract");
                         book.Category = GetStr(page, "category");
                         book.Status = GetStr(page, "creationStatus") == "1" ? "已完结" : "连载中";
+
+                        // 封面：番茄给的是 https://p*.byteimg.com/… 绝对地址
+                        var cover = GetStr(page, "thumbUrl");
+                        if (string.IsNullOrEmpty(cover)) cover = GetStr(page, "audioThumbUrl");
+                        if (string.IsNullOrEmpty(cover)) cover = GetStr(page, "coverUrl");
+                        if (!string.IsNullOrEmpty(cover))
+                            book.CoverUrl = CoverFetcher.Absolutize(cover, book.Url);
+
+                        // 字数：番茄在 page 里给 wordNumber，能省掉本地统计
+                        var wn = GetStr(page, "wordNumber");
+                        long words;
+                        if (!string.IsNullOrEmpty(wn) && long.TryParse(wn, out words)) book.WordCount = words;
                     }
                 }
             }

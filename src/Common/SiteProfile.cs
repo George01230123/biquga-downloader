@@ -28,6 +28,21 @@ namespace TomatoBiquga
         public string UserAgent = "";        // 空 = 用内置默认
 
         /// <summary>
+        /// HTTP 代理。空 = 直连。
+        /// 支持 http:// / https:// / socks5:// 三种写法；也可以只写 "127.0.0.1:7890"（按 http 处理）。
+        /// 交给 curl.exe 的 -x 执行，所以 SOCKS 也能用（.NET 原生后端不支持 SOCKS，
+        /// 那种情况只有 curl 后端生效）。
+        /// </summary>
+        public string Proxy = "";
+
+        /// <summary>
+        /// Cookie 请求头。空 = 不带。
+        /// 用途是「让站点认得你」而不是绕过权限：有些站的封面/详情接口需要登录态
+        /// 才返回完整数据，填自己的 Cookie 就能正常拿到。
+        /// </summary>
+        public string Cookie = "";
+
+        /// <summary>
         /// 输出文件编码。只允许这两种：
         ///  utf-8（默认，带 BOM，手机阅读器/记事本都认）
         ///  gbk（老设备/老阅读器需要）
@@ -42,6 +57,8 @@ namespace TomatoBiquga
             TimeoutSeconds = Clamp(TimeoutSeconds, 5, 300);
             MaxRetries = Clamp(MaxRetries, 0, 10);
             if (string.IsNullOrEmpty(UserAgent)) UserAgent = "";
+            if (string.IsNullOrEmpty(Proxy)) Proxy = "";
+            if (string.IsNullOrEmpty(Cookie)) Cookie = "";
             if (!IsUtf8(OutputEncoding) && !IsGbk(OutputEncoding)) OutputEncoding = "utf-8";
         }
 
@@ -197,6 +214,8 @@ namespace TomatoBiquga
                         case "useragent": if (val.Length > 0) prof.UserAgent = val; break;
                         case "outputencoding": prof.OutputEncoding = val; break;
                         case "displayname": if (val.Length > 0) prof.DisplayName = val; break;
+                        case "proxy": prof.Proxy = val; break;
+                        case "cookie": prof.Cookie = val; break;
                         // 未知键忽略：以后加参数时老文件也不会报错
                     }
                 }
@@ -220,12 +239,17 @@ namespace TomatoBiquga
             sb.AppendLine("# ============================================================");
             sb.AppendLine("# 站点连接参数（这个文件可以直接用记事本改，改完重启程序生效）");
             sb.AppendLine("#");
-            sb.AppendLine("# 只放「怎么连接」的参数：并发 / 请求间隔 / 超时 / 重试 / User-Agent / 输出编码。");
+            sb.AppendLine("# 只放「怎么连接」的参数：并发 / 请求间隔 / 超时 / 重试 / User-Agent / 输出编码 / 代理 / Cookie。");
             sb.AppendLine("# 本文件**不接受**选择器、正则、XPath 这类「内容怎么提取」的规则 ——");
             sb.AppendLine("# 那是书源规则，本工具不内置、不分发（放进来会被忽略）。");
             sb.AppendLine("#");
             sb.AppendLine("# 调节建议：被站点限速（正文变成「访问太频繁」）就把 workers 调小、间隔调大；");
             sb.AppendLine("#           网络好又想快，可以适当调大 workers，但别超过 16。");
+            sb.AppendLine("#");
+            sb.AppendLine("# proxy：走代理时填，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080，");
+            sb.AppendLine("#        留空 = 直连。SOCKS 只有 curl 后端支持（Windows 10+ 自带 curl，一般都能用）。");
+            sb.AppendLine("# cookie：需要登录态的站点填自己的 Cookie（浏览器 F12 → Network → 请求头里复制整串）。");
+            sb.AppendLine("#         这是让站点「认得你」，不是绕过权限 —— 请只填你自己账号的 Cookie。");
             sb.AppendLine("# ============================================================");
             sb.AppendLine();
             foreach (var p in profiles)
@@ -239,6 +263,8 @@ namespace TomatoBiquga
                 sb.AppendLine("maxretries=" + p.MaxRetries);
                 sb.AppendLine("outputencoding=" + p.OutputEncoding);
                 sb.AppendLine("useragent=" + p.UserAgent);
+                sb.AppendLine("proxy=" + p.Proxy);
+                sb.AppendLine("cookie=" + p.Cookie);
                 sb.AppendLine();
             }
             try { File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true)); }
@@ -253,6 +279,9 @@ namespace TomatoBiquga
             Http.TimeoutSeconds = p.TimeoutSeconds;
             Http.MaxRetries = p.MaxRetries;
             if (!string.IsNullOrEmpty(p.UserAgent)) Http.UserAgent = p.UserAgent;
+            // 代理 / Cookie：空字符串也要写回去，否则上一本书设置的代理会残留到这一本
+            Http.Proxy = p.Proxy ?? "";
+            Http.Cookie = p.Cookie ?? "";
         }
 
         public static string CurrentEncodingName(SiteProfile p)

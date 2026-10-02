@@ -17,6 +17,19 @@ namespace TomatoBiquga
         public string BookId = "";        // 番茄的 book_id
         public List<ChapterInfo> Chapters = new List<ChapterInfo>();
 
+        /// <summary>
+        /// 封面图片地址（详情页解析出来的，可能是相对路径）。
+        /// 空 = 站点没给封面。图片本身在下载阶段落到书目录下的 封面.xxx，
+        /// 这样导出 EPUB 时不需要联网。
+        /// </summary>
+        public string CoverUrl = "";
+
+        /// <summary>
+        /// 总字数。站点给了就用站点的（番茄有），没给就留 0，
+        /// 由 <see cref="BookStats"/> 按已下载正文现算。
+        /// </summary>
+        public long WordCount = 0;
+
         public override string ToString()
         {
             return string.Format("《{0}》  作者：{1}  [{2}]  {3}  共 {4} 章",
