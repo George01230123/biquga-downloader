@@ -147,7 +147,7 @@ namespace TomatoBiquga
 
             btnSearch = MakeButton("搜索", 40, (s, e) => DoSearch());
             btnLoad = MakeButton("载入目录", 64, (s, e) => DoLoadBook());
-            btnReload = MakeButton("刷新目录", 64, (s, e) => DoLoadBook(true));
+            btnReload = MakeButton("刷新目录", 64, (s, e) => DoLoadBookRefresh());
 
             row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLoad, btnReload });
 
@@ -657,6 +657,42 @@ namespace TomatoBiquga
                 "浏览器搜索 · 使用说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
+        /// <summary>
+        /// 「刷新目录」按钮：如果这本书有遍历断点，就先问一句"接着上次走，还是从头来"。
+        ///
+        /// 为什么让用户选而不是自动续：续爬省时间，但**从上次的位置接着走**意味着
+        /// 如果站点在这期间改了目录，拿到的会是"新旧拼接"的结果。
+        /// 用户自己知道自己是"昨天没爬完"还是"想要最新目录"，所以由他决定。
+        /// </summary>
+        private void DoLoadBookRefresh()
+        {
+            if (_busy) { BusyNotice("刷新目录"); return; }
+            var book = lstBooks.SelectedItems.Count > 0 ? lstBooks.SelectedItems[0].Tag as BookInfo : null;
+            if (book != null && !string.IsNullOrEmpty(book.Dir) && CrawlResume.Exists("biquga", book.Dir))
+            {
+                if (!SuppressDialogs)
+                {
+                    var r = MessageBox.Show(this,
+                        "这本书上次的目录遍历没有走完，本地留着一份断点。\n\n" +
+                        "「是」= 从断点继续（省时间，接着上次的进度走）\n" +
+                        "「否」= 从头重新遍历（目录最完整，但要重新走一遍）\n\n" +
+                        "如果离上次遍历已经很久、站点更新了不少章节，建议选「否」。",
+                        "继续上次的遍历？", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (r == DialogResult.Cancel) return;
+                    if (r == DialogResult.Yes)
+                    {
+                        _resumeBookDir = book.Dir;
+                        Log("已选择「继续上次遍历」：" + _resumeBookDir);
+                        DoLoadBook(true);
+                        _resumeBookDir = null;
+                        return;
+                    }
+                }
+            }
+            _resumeBookDir = null;
+            DoLoadBook(true);
+        }
+
         private void DoLoadBook(bool forceRefresh = false)
         {
             if (_busy) { BusyNotice(Text); return; }
@@ -686,7 +722,7 @@ namespace TomatoBiquga
             RunBackground("载入目录中…", () => DoLoadBookCore(book, site));
         }
 
-        /// <summary>把“强制刷新 / 离线模式”标志透传给站点实现</summary>
+        /// <summary>把“强制刷新 / 离线模式 / 续爬”标志透传给站点实现</summary>
         private void SetRefresh(ISite site, bool force)
         {
             bool offline = chkOffline != null && chkOffline.Checked;
@@ -696,6 +732,9 @@ namespace TomatoBiquga
                 bq.ForceRefresh = force || offline;
                 bq.Offline = offline;
                 bq.CrawlWorkers = _settings.BiqugaPcWorkers;
+                // 续爬：只有在"这本书确实有断点"时才打开，否则会白读一次不存在的断点文件
+                bq.Resume = _resumeBookDir != null &&
+                            string.Equals(_resumeBookDir, bq.CurrentDir, StringComparison.Ordinal);
                 if (offline && !_offlineHinted)
                 {
                     _offlineHinted = true;
@@ -1030,6 +1069,12 @@ namespace TomatoBiquga
         }
 
         private bool _offlineHinted;
+
+        /// <summary>
+        /// 本次载入要从这个书目录的遍历断点续爬（null = 不续）。
+        /// 由「刷新目录」按钮在用户选择"继续上次遍历"时设置，用完立刻清掉。
+        /// </summary>
+        private string _resumeBookDir;
         private DateTime _dlStart;
 
         /// <summary>把时长格式化成 3分20秒 这样的形式</summary>

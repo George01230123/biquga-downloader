@@ -168,6 +168,8 @@ namespace TomatoBiquga
                 TestNetDiag();
                 // 任务队列持久化
                 TestQueuePersistence(work);
+                // 目录遍历断点续爬
+                TestCrawlResume();
             }
             catch (Exception ex)
             {
@@ -2577,6 +2579,195 @@ namespace TomatoBiquga
             Eq("队列：空白项被丢弃", 2, Bookshelf.LoadQueue(path).Count);
 
             try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+
+        // ============================================================
+        //  17) 目录遍历断点续爬
+        // ============================================================
+
+        /// <summary>
+        /// 遍历断点的存取。
+        ///
+        /// 为什么必须测"换书要作废"这一条：断点里存的是"下次从哪一页接着走"。
+        /// 如果校验不严，A 书的断点被 B 书用上，**能把 A 的章节拼进 B 的目录里** ——
+        /// 这比"重走一遍"糟糕得多（重走只是慢，拼错是数据损坏）。
+        /// 所以 StartKey 校验是关键路径，必须有断言守着。
+        /// </summary>
+        private static void TestCrawlResume()
+        {
+            // 用真实的 cache 目录（CrawlResume 固定读 exe 同目录\cache），
+            // 造一份断点、验完删掉，不留垃圾（和 TestDirCacheRoundTrip 同样的约定）。
+            const string site = "biquga";
+            const string dirKey = "/0_0-resumetest";
+            const string startKey = "99999999";
+            var path = CrawlResume.PathFor(site, dirKey);
+
+            try
+            {
+                CrawlResume.Clear(site, dirKey);
+                Check("续爬：清空后不存在断点", !CrawlResume.Exists(site, dirKey));
+
+                var s = new CrawlResume.State
+                {
+                    Site = site,
+                    BookDir = dirKey,
+                    StartKey = startKey,
+                    NextKey = "88888888_2",
+                    Pages = 350,
+                };
+                s.Ids.Add("88888889");
+                s.Titles.Add("第三章 带\"引号\"的标题");
+                s.Ids.Add("88888888");
+                s.Titles.Add("第二章 with English");
+                s.Ids.Add("77777777");
+                s.Titles.Add("");
+
+                Check("续爬：保存成功", CrawlResume.Save(s));
+                Check("续爬：文件已写出", File.Exists(path));
+                Check("续爬：Exists 返回 true", CrawlResume.Exists(site, dirKey));
+
+                var back = CrawlResume.Load(site, dirKey, startKey);
+                Check("续爬：能读回来", back != null);
+                if (back != null)
+                {
+                    Eq("续爬：NextKey 往返正确", "88888888_2", back.NextKey);
+                    Eq("续爬：StartKey 往返正确", startKey, back.StartKey);
+                    Eq("续爬：Pages 往返正确", 350, back.Pages);
+                    Eq("续爬：章节数一致", 3, back.Ids.Count);
+                    Eq("续爬：第一个 id", "88888889", back.Ids.Count > 0 ? back.Ids[0] : "");
+                    // 标题里带引号是最容易在手工拼 JSON 时出错的
+                    Eq("续爬：带引号的标题往返正确", "第三章 带\"引号\"的标题",
+                        back.Titles.Count > 0 ? back.Titles[0] : "");
+                    Eq("续爬：id 与标题一一对应", back.Ids.Count, back.Titles.Count);
+                }
+
+                // ★ 关键：起始页 key 对不上 → 必须作废（否则会把别的书的章节拼进来）
+                Check("续爬：换书后断点作废（StartKey 不匹配）",
+                    CrawlResume.Load(site, dirKey, "12345678") == null);
+                Check("续爬：不给 StartKey 时仍可读",
+                    CrawlResume.Load(site, dirKey, null) != null);
+
+                // 换目录 → 读不到（路径都不同）
+                Check("续爬：换书目录读不到", CrawlResume.Load(site, "/9_9-other", startKey) == null);
+
+                // 缺 NextKey 的断点没有意义（不知道从哪接着走）→ 不保存
+                var bad = new CrawlResume.State { Site = site, BookDir = dirKey, StartKey = startKey, NextKey = "" };
+                bad.Ids.Add("1");
+                Check("续爬：没有 NextKey 的断点不保存", !CrawlResume.Save(bad));
+
+                // 损坏文件 → null，不抛
+                File.WriteAllText(path, "{ 这不是 json ", new UTF8Encoding(false));
+                Check("续爬：损坏文件返回 null 不抛异常", CrawlResume.Load(site, dirKey, startKey) == null);
+
+                CrawlResume.Clear(site, dirKey);
+                Check("续爬：Clear 能删掉断点", !CrawlResume.Exists(site, dirKey));
+            }
+            finally
+            {
+                try { CrawlResume.Clear(site, dirKey); } catch { }
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+            }
+
+            // 默认不能改变原有行为
+            var pc = new BiqugaSite();
+            Check("续爬：BiqugaSite.Resume 默认关闭（不改变原有行为）", !pc.Resume);
+
+            TestResumeBoundary();
+        }
+
+        /// <summary>
+        /// 续爬的**边界正确性**：中断点前后会不会漏章 / 重复章。
+        ///
+        /// 为什么单独测这个：断点存的是"下一页要抓谁"。语义错一位的话，
+        /// 断点那一页要么被跳过（漏章）、要么被收录两次 ——
+        /// 而这两种都**不会报错**，只会让目录悄悄少一章或多一章。
+        ///
+        /// 用一条可控的模拟链（100→99→…→1）走两遍：一次走完当基准；
+        /// 一次走到第 60 页落断点后"中断"、再从断点续完，最后比对两边必须完全一致。
+        /// </summary>
+        private static void TestResumeBoundary()
+        {
+            const string site = "biquga";
+            const string dirKey = "/0_0-boundarytest";
+            const string startKey = "100";
+
+            try
+            {
+                CrawlResume.Clear(site, dirKey);
+
+                // 基准：完整走完（stopAfter=0 表示不中断）
+                var full = WalkFakeChain(startKey, 0, site, dirKey);
+                Eq("续爬边界：基准链共 100 章", 100, full.Count);
+
+                // 走到第 40 页落断点并中断
+                CrawlResume.Clear(site, dirKey);
+                var part = WalkFakeChain(startKey, 40, site, dirKey);
+                Eq("续爬边界：中断处已收录 40 章", 40, part.Count);
+
+                var st = CrawlResume.Load(site, dirKey, startKey);
+                Check("续爬边界：断点可读回", st != null);
+                if (st == null) return;
+                Eq("续爬边界：断点里记的 NextKey 是下一页", "60", st.NextKey);
+
+                // 从断点续完，按 CrawlChapters 的语义合并（同 id 不重复收录）
+                var merged = new List<string>(st.Ids);
+                var seen = new HashSet<string>(st.Ids);
+                foreach (var cid in WalkFakeChain(st.NextKey, 0, site, dirKey))
+                    if (seen.Add(cid)) merged.Add(cid);
+
+                Eq("续爬边界：★ 续爬后章数与一次走完一致", full.Count, merged.Count);
+
+                var setA = new HashSet<string>(full);
+                var setC = new HashSet<string>(merged);
+                Check("续爬边界：★ 没有缺章", setC.IsSupersetOf(setA));
+                Eq("续爬边界：★ 没有重复章", setA.Count, setC.Count);
+
+                // 边界页本身必须只出现一次
+                int inA = 0, inC = 0;
+                foreach (var x in full) if (x == st.NextKey) inA++;
+                foreach (var x in merged) if (x == st.NextKey) inC++;
+                Eq("续爬边界：★ 边界页在基准里出现 1 次", 1, inA);
+                Eq("续爬边界：★ 边界页在续爬结果里也只出现 1 次", 1, inC);
+            }
+            finally
+            {
+                try { CrawlResume.Clear(site, dirKey); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 复刻 CrawlChapters 的遍历语义：每页收一个章节 id，prev = id-1，走到 0 结束；
+        /// 走完 stopAfter 页就落一次断点并"中断"（下次从断点的 NextKey 接着走）。
+        /// </summary>
+        private static List<string> WalkFakeChain(string startKey, int stopAfter, string site, string dirKey)
+        {
+            var byCid = new Dictionary<string, string>();
+            var order = new List<string>();
+            string key = startKey;
+            int pages = 0;
+
+            while (!string.IsNullOrEmpty(key) && pages < 20000)
+            {
+                int n;
+                if (!int.TryParse(key, out n) || n <= 0) break;   // 回到目录页
+                pages++;
+                if (!byCid.ContainsKey(key)) { byCid[key] = "第" + key + "章"; order.Add(key); }
+
+                key = (n - 1).ToString();
+
+                if (stopAfter > 0 && pages == stopAfter)
+                {
+                    var s = new CrawlResume.State
+                    {
+                        Site = site, BookDir = dirKey, StartKey = startKey,
+                        NextKey = key, Pages = pages,
+                    };
+                    foreach (var cid in order) { s.Ids.Add(cid); s.Titles.Add(byCid[cid]); }
+                    CrawlResume.Save(s);
+                    break;      // 模拟中断
+                }
+            }
+            return order;
         }
 
         // ============================================================

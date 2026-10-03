@@ -37,6 +37,12 @@ namespace TomatoBiquga
         public bool ForceRefresh = false;
 
         /// <summary>
+        /// 当前正在遍历/载入的书目录（如 /10_10333）。
+        /// 给界面判断"这本书有没有遍历断点"用 —— 断点是按书目录存的。
+        /// </summary>
+        public string CurrentDir = "";
+
+        /// <summary>
         /// 离线模式：目录遍历时把整本正文留在内存，下载阶段完全不联网。
         /// 代价是内存（一本 300 万字约 6MB）和“目录缓存不再生效”（每次都要真遍历）。
         /// </summary>
@@ -145,10 +151,10 @@ namespace TomatoBiquga
             }
             if (lastCid == null) lastCid = seq[seq.Count - 1];
 
+            CurrentDir = book.Dir;      // 给界面判断"这本书有没有断点"
             if (log != null) log("《" + book.Title + "》 " + book.Author + " —— 从最后一章往回遍历目录（顺“上一页”链，一章不漏，全书约 1~2 分钟）…");
 
-            book.Chapters = CrawlChapters(book.Dir, lastCid, log);
-            if (book.Chapters.Count == 0) throw new Exception("没抓到任何章节，站点结构可能变了");
+            book.Chapters = CrawlChapters(book.Dir, lastCid, log);            if (book.Chapters.Count == 0) throw new Exception("没抓到任何章节，站点结构可能变了");
             if (log != null) log(string.Format("目录完成：共 {0} 章（{1} → {2}）", book.Chapters.Count,
                 book.Chapters[0].Title, book.Chapters[book.Chapters.Count - 1].Title));
 
@@ -187,11 +193,40 @@ namespace TomatoBiquga
             string key = firstCid;      // 起始 = 最后一章
             int pages = 0, failures = 0;
 
+            // ---- 断点续爬：有上次的断点就从断点接着走 ----
+            // 链是确定的（每页的 prev 唯一指向前一页），所以"从某页接着走"等价于
+            // "从最后一章一路走到那一页"。这样两小时的遍历中断后不用整本重来。
+            var resume = Resume ? CrawlResume.Load(SiteKey, dir, firstCid) : null;
+            if (resume != null && resume.Ids.Count > 0)
+            {
+                for (int i = 0; i < resume.Ids.Count; i++)
+                {
+                    var id = resume.Ids[i];
+                    if (string.IsNullOrEmpty(id) || byCid.ContainsKey(id)) continue;
+                    byCid[id] = i < resume.Titles.Count ? resume.Titles[i] : "";
+                    order.Add(id);
+                }
+                key = resume.NextKey;
+                pages = resume.Pages;
+                if (log != null)
+                    log(string.Format("  从上次的断点继续（已收录 {0} 章 / 走过 {1} 页，断点保存于 {2}）",
+                        byCid.Count, resume.Pages,
+                        resume.SavedAt == DateTime.MinValue ? "未知" : resume.SavedAt.ToString("MM-dd HH:mm")));
+            }
+            else if (log != null && Resume)
+            {
+                log("  没有可用的遍历断点（或断点不属于这本书），从最后一章开始遍历。");
+            }
+
+            int sinceCheckpoint = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
             while (!string.IsNullOrEmpty(key) && pages < 20000)
             {
                 if (visited.Contains(key)) break;
                 visited.Add(key);
                 pages++;
+                sinceCheckpoint++;
 
                 string html = null;
                 for (int attempt = 0; attempt < 3 && html == null; attempt++)
@@ -226,11 +261,20 @@ namespace TomatoBiquga
                 if (log != null && pages % 50 == 0)
                     log(string.Format("  目录遍历中：已收录 {0} 章（第 {1} 页，共约 {2} 页待走）", byCid.Count, pages, 772));
                 if (pages % 3 == 0) Http.Polite();
+
+                // 定期落一次断点。间隔按"页数 + 时间"双条件：
+                // 页数保证不会太频繁写盘，时间保证**慢网络下也不会太久不落**
+                // （站点限速时 50 页可能要十几分钟，那就跨得太久了）。
+                if (sinceCheckpoint >= 50 || (sinceCheckpoint > 0 && sw.Elapsed.TotalSeconds >= 45))
+                {
+                    sinceCheckpoint = 0;
+                    sw.Restart();
+                    SaveCheckpoint(dir, firstCid, key, pages, byCid, order);
+                }
             }
 
             // 章节 id 单调递增 → 按 id 升序即阅读顺序
-            var ids = new List<string>(byCid.Keys);
-            ids.Sort(delegate (string a, string b)
+            var ids = new List<string>(byCid.Keys);            ids.Sort(delegate (string a, string b)
             {
                 long x, y;
                 bool ax = long.TryParse(a, out x), by = long.TryParse(b, out y);
@@ -270,7 +314,52 @@ namespace TomatoBiquga
             }
 
             if (log != null && failures > 0) log("  期间有 " + failures + " 页抓取失败（已跳过）");
+
+            // 遍历正常走到底 → 断点没用了，删掉。
+            // 不删的话下次载入会"续"到一份已经走完的断点，白跑一趟。
+            CrawlResume.Clear(SiteKey, dir);
+
             return list;
+        }
+
+        /// <summary>
+        /// 为 true 时，载入目录会先尝试从上次的遍历断点继续。
+        /// 默认 false：**不改变原有行为**，由界面上的「继续遍历」按钮显式打开。
+        /// </summary>
+        public bool Resume = false;
+
+        /// <summary>断点/目录缓存用的站点 key</summary>
+        protected virtual string SiteKey { get { return "biquga"; } }
+
+        /// <summary>
+        /// 落一次遍历断点。正文**不**写进断点（体积太大），
+        /// 所以续爬后重新走的那段只为拿到更靠前的章节，正文在下载阶段按需再抓。
+        /// </summary>
+        private void SaveCheckpoint(string dir, string firstCid, string nextKey, int pages,
+            Dictionary<string, string> byCid, List<string> order)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(nextKey)) return;
+                var s = new CrawlResume.State
+                {
+                    Site = SiteKey,
+                    BookDir = dir,
+                    StartKey = firstCid,
+                    NextKey = nextKey,
+                    Pages = pages,
+                };
+                // order 是"发现顺序"（从新到旧），断点里原样保留；
+                // 续爬时按同样顺序塞回 byCid/order，最终仍按 id 排序，所以顺序不影响正确性
+                foreach (var cid in order)
+                {
+                    s.Ids.Add(cid);
+                    string t;
+                    s.Titles.Add(byCid.TryGetValue(cid, out t) ? (t ?? "") : "");
+                }
+                CrawlResume.Save(s);
+            }
+            catch { /* 落断点失败不能影响遍历本身 */ }
         }
 
         // ---------------------------------------------------------- 正文
