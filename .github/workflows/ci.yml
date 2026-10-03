@@ -156,6 +156,11 @@ jobs:
           files: |
             novel-downloader-${{ github.ref_name }}-win64.zip
             novel-downloader-${{ github.ref_name }}-win64-selftest.zip
+          # ★ 不要把 body 写死成一段通用说明。
+          #   这里原来给的是"下载即用"模板，结果**每一个版本的 Release 说明都长一样** ——
+          #   用户点进去看不到"这一版改了什么"。手写的说明也只存在于本地，会被这里覆盖掉。
+          #   现在改成让 GitHub 按 git 历史自动生成（提交列表 + 上一版以来的变更），
+          #   再在后面追加固定的下载/合规说明。
           generate_release_notes: true
           body: |
             ## 下载即用
@@ -163,9 +168,12 @@ jobs:
             解压后双击 `start.bat`（或直接双击 exe），无需安装、无需任何运行时
             （Windows 10 1903+ / 11 自带 .NET Framework 4.8）。
 
-            一般下 `...-win64.zip`（约 100 KB）。另有一个 `...-selftest.zip`，
-            多带三个自测程序（`_offlinetests` / `_e2e` / `_liveprobe`），
-            **下载出问题时**用它定位，提 issue 时把前两个的输出贴上来即可。
+            一般下 `...-win64.zip`。另有一个 `...-selftest.zip`，多带三个自测程序
+            （`_offlinetests` / `_e2e` / `_liveprobe`），**下载出问题时**用它定位，
+            提 issue 时把前两个的输出贴上来即可（前两个不联网）。
+
+            > 标题栏显示的版本号是从程序集读的，可以和本页的 tag 对照，
+            > 确认自己没在用旧版。
 
             ## 只做「解析公开网页 + 导出本地 TXT」
 

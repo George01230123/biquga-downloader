@@ -20,11 +20,15 @@
 ## 一、快速开始
 
 **下载**：[最新版 Release](https://github.com/George01230123/biquga-downloader/releases/latest)
-（`novel-downloader-v1.1.1-win64.zip`，约 100 KB —— 程序本体 + 启动器 + 文档）
+（附件名形如 `novel-downloader-v<版本>-win64.zip`，约 120 KB —— 程序本体 + 启动器 + 文档）
 
-> 另有一个 `...-selftest.zip`：多带了 `_offlinetests.exe` / `_e2e.exe` / `_liveprobe.exe` / `_selftest.exe`
-> 四个自测程序，**不需要它们也能正常下载**，只是下载出问题时用来定位。
+> 另有一个 `...-selftest.zip`：多带了 `_offlinetests.exe` / `_e2e.exe` / `_liveprobe.exe`
+> 三个自测程序，**不需要它们也能正常下载**，只是下载出问题时用来定位。
 > 提 issue 时把前两个的输出贴上来就够我判断了（前两个不联网）。
+>
+> ⚠️ **注意别下到旧版**：如果你的标题栏显示的是 `v1.0.x`，那是很早的版本
+> （没有书架 / 错字检测 / 断点续爬这些功能）。标题栏的版本号是从程序集读的，
+> 可以直接对照 Release 页上的 tag。
 
 > **打不开 github.com？**（国内网络常见，本项目开发期间实测断过两次）
 > `api.github.com` 通常还是通的，粘这段到 PowerShell 就能下（不用改任何东西）：
