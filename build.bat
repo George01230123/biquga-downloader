@@ -58,6 +58,16 @@ rem v1.0.2 happened (one build path updated, the other forgotten), so it lives h
  src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\LayoutProbe.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
+rem Text-fit probe: measures every button label with TextRenderer and fails if the
+rem button is too narrow for its own text. Needed because the layout probe only checks
+rem overflow/overlap -- a button squeezed to "???..." is neither, so it passes geometry
+rem while the user cannot read the UI at all. That exact bug shipped: MakeButton set a
+rem hardcoded Width plus AutoEllipsis, so on a font/DPI where the label measured wider
+rem than the design value, every button lost its text.
+"%CSC%" %FLAGS% /target:exe /main:TextFitProbe /out:"dist\_textfit.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\TextFitProbe.cs %COMMON% %SITES%
+if errorlevel 1 goto failed
+
 echo [4/6] Building offline unit tests (no network needed, used by CI)...
 rem DirCache.KeyFor calls a static BiqugaSite helper, so the site sources are linked in
 rem as well. MainForm is linked too: the layout self-test builds a real (offscreen) form

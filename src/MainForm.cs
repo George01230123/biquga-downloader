@@ -83,8 +83,10 @@ namespace TomatoBiquga
 
         public MainForm()
         {
-            // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明
-            Text = "小说下载器 v1.0.5（免安装单文件版）";
+            // 标题避开第三方商标：产品名用 ASCII 的 novel-downloader（= 仓库名），中文名只作说明。
+            // ★ 版本号从程序集读，不写死在字符串里 —— 之前这里硬编码 "v1.0.5"，
+            //   发到 1.2.0 之后标题还显示 1.0.5（用户看截图会以为装的是旧版）。
+            Text = "小说下载器 v" + UpdateChecker.CurrentVersionText + "（免安装单文件版）";
             Width = 1000;
             Height = 720;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1337,19 +1339,34 @@ namespace TomatoBiquga
         }
 
         /// <summary>
-        /// 建一个自动宽度的按钮：宽度 = 文字实测宽度 + 左右内边距（默认 16px）。
-        /// 为什么不用固定宽度：老代码里按钮宽度是手写的，中文字体一变（换 DPI、
-        /// 换系统字体）就被切字。压测见 docs/界面布局.md。
+        /// <summary>
+        /// 建一个**自动宽度**的按钮：宽度由文字实测宽度决定。
+        ///
+        /// ★ 为什么必须 AutoSize，不能写死 Width：
+        ///   之前这里是 `Width = width` + `AutoEllipsis = true`，
+        ///   结果在**中文系统 + 高 DPI / 非 100% 缩放**下（WinForms 的
+        ///   AutoScaleMode.Font 会把控件按字体缩放，但那个写死的 width 是设计值），
+        ///   实测宽度不够，按钮文字被压成「搜…」「载入…」「设…」——
+        ///   用户完全看不懂按钮是干什么的。截图见 issue 反馈。
+        ///
+        ///   AutoSize 让按钮自己按**实际字体**量文字，所以换 DPI、换系统字体、
+        ///   换语言都不会被切字。原有的 width 参数保留只是为了不改所有调用点，
+        ///   现在只当"最小宽度"用（有些按钮太窄不好点，比如「全选」）。
         /// </summary>
         private Button MakeButton(string text, int width, Action<object, EventArgs> onClick, int rightMargin = 4)
         {
             var b = new Button
             {
                 Text = text,
-                Width = width,
+                AutoSize = true,
+                // GrowAndShrink：AutoSize 只负责"撑到够放文字"，不会把按钮拉到别的尺寸
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                MinimumSize = new Size(width, 26),
                 Height = 26,
                 Margin = new Padding(0, 0, rightMargin, 0),
-                AutoEllipsis = true,
+                // 关掉省略号：AutoSize 之后文字一定放得下，再开着它反而会在
+                // 极端缩放下"有省略号但看不出来被截断"，掩盖真正的布局问题。
+                AutoEllipsis = false,
             };
             if (onClick != null) b.Click += (s, e) => onClick(s, e);
             return b;

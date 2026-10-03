@@ -23,8 +23,9 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.2.0：站点探活与自动降级、错字检测（双源比对）、队列持久化、
-//        书架搜索/一键检查更新、导出时繁简转换、磁盘空间预检、CI 定时联网冒烟。
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
-[assembly: AssemblyInformationalVersion("1.2.0")]
+// 1.2.1：修掉"按钮文字被压成省略号"（MakeButton 写死宽度 + AutoEllipsis，
+//        在中文系统 + 非 100% 缩放下整排按钮只显示「搜…」「载入…」），
+//        程序标题的版本号改成从程序集读（原来硬编码 v1.0.5，发到 1.2.0 还显示 1.0.5）。
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyInformationalVersion("1.2.1")]

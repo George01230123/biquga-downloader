@@ -875,6 +875,20 @@ namespace TomatoBiquga
                             {
                                 Check("按钮在位：" + want + "（" + where + "）", texts.Contains(want));
                             }
+
+                            // ★ 文字必须放得下：按钮被压成「搜…」「载入…」时，
+                            //   既不越界也不重叠，几何检查完全合规 —— 但用户根本看不懂界面。
+                            //   这个 bug 真的发出去过（MakeButton 写死宽度 + 开 AutoEllipsis，
+                            //   在中文系统 + 非 100% 缩放下文字被截断），所以在这里钉死。
+                            var bad = new List<string>();
+                            CheckButtonTextFits(f, bad);
+                            Check("按钮文字都放得下（" + where + "）", bad.Count == 0);
+                            if (bad.Count > 0)
+                            {
+                                var head = new StringBuilder();
+                                for (int i = 0; i < bad.Count && i < 4; i++) head.Append(" | ").Append(bad[i]);
+                                Failures.Add("      文字被截断的按钮：" + head);
+                            }
                             if (problems.Count > 0)
                             {
                                 var head = new StringBuilder();
@@ -954,6 +968,35 @@ namespace TomatoBiquga
             {
                 if (c is Button && !string.IsNullOrEmpty(c.Text)) into.Add(c.Text);
                 if (c.HasChildren) CollectButtonTexts(c, into);
+            }
+        }
+
+        /// <summary>
+        /// 找出"文字放不下"的按钮。
+        ///
+        /// 判据：用 TextRenderer 按**实际字体**量文字宽度，和按钮的可用宽度比。
+        /// 放不下 → 按钮会画省略号（或直接切字），用户就看不到按钮是干什么的。
+        ///
+        /// 为什么必须单独测：这类问题**既不越界也不重叠**，
+        /// 布局体检（CollectLayoutProblems）结构上看不见它。
+        /// </summary>
+        private static void CheckButtonTextFits(Control parent, List<string> bad)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                var b = c as Button;
+                if (b != null && !string.IsNullOrEmpty(b.Text))
+                {
+                    var measured = TextRenderer.MeasureText(b.Text, b.Font);
+                    int available = b.ClientSize.Width - 6;   // 留 3px 左右边距
+                    if (measured.Width > available)
+                        bad.Add(string.Format("「{0}」需要 {1}px / 可用 {2}px", b.Text, measured.Width, available));
+                    // AutoEllipsis 开着会让"宽度不够"表现成省略号而不是硬切，
+                    // 反而把真正的问题藏起来 —— 所以它必须关掉。
+                    if (b.AutoEllipsis)
+                        bad.Add(string.Format("「{0}」开着 AutoEllipsis（会掩盖文字被截断）", b.Text));
+                }
+                if (c.HasChildren) CheckButtonTextFits(c, bad);
             }
         }
 
