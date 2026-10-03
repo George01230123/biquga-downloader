@@ -146,6 +146,9 @@ namespace TomatoBiquga
             sb.Append("    <dc:title>").Append(X(book.Title)).Append("</dc:title>\n");
             sb.Append("    <dc:language>zh-CN</dc:language>\n");
             sb.Append("    <dc:creator>").Append(X(string.IsNullOrEmpty(book.Author) ? "未知" : book.Author)).Append("</dc:creator>\n");
+            // dc:date：EPUB3 只要求 dcterms:modified，但 Calibre / KOReader 这类书库
+            // 是按 dc:date 显示"更新于"并据此排序的 —— 缺了它书架里那一列就是空的。
+            sb.Append("    <dc:date>").Append(X(now)).Append("</dc:date>\n");
             if (!string.IsNullOrEmpty(book.Desc))
                 sb.Append("    <dc:description>").Append(X(Shorten(book.Desc, 1000))).Append("</dc:description>\n");
             if (!string.IsNullOrEmpty(book.Url))

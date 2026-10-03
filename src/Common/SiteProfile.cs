@@ -49,6 +49,19 @@ namespace TomatoBiquga
         /// </summary>
         public string OutputEncoding = "utf-8";
 
+        /// <summary>
+        /// 站点域名覆盖（只在 [biquga-m] 有意义）。空 = 用内置默认。
+        ///
+        /// 这是给"站点自己换域名"准备的逃生口：域名变了不用等作者发新版，
+        /// 改一行配置就能继续用。实测 `m.biquga.com` 曾被 CDN 按 SNI 拒掉 TLS，
+        /// 而当时域名是 const、运行时改不了，用户只能改代码重编译。
+        ///
+        /// 注意：换域名**不能**把移动版的快速目录结构带过去 ——
+        /// `www.biquga.com/{dir}/dindex_1.html` 返回的是 PC 版页面。
+        /// 所以域名不可用时正确的做法是换站点，不是换域名（见 NetDiag 的提示）。
+        /// </summary>
+        public string MobileHost = "";
+
         public void Clamp()
         {
             Workers = Clamp(Workers, 1, 32);
@@ -59,6 +72,7 @@ namespace TomatoBiquga
             if (string.IsNullOrEmpty(UserAgent)) UserAgent = "";
             if (string.IsNullOrEmpty(Proxy)) Proxy = "";
             if (string.IsNullOrEmpty(Cookie)) Cookie = "";
+            if (string.IsNullOrEmpty(MobileHost)) MobileHost = "";
             if (!IsUtf8(OutputEncoding) && !IsGbk(OutputEncoding)) OutputEncoding = "utf-8";
         }
 
@@ -216,6 +230,7 @@ namespace TomatoBiquga
                         case "displayname": if (val.Length > 0) prof.DisplayName = val; break;
                         case "proxy": prof.Proxy = val; break;
                         case "cookie": prof.Cookie = val; break;
+                        case "mobilehost": prof.MobileHost = val; break;
                         // 未知键忽略：以后加参数时老文件也不会报错
                     }
                 }
@@ -265,6 +280,13 @@ namespace TomatoBiquga
                 sb.AppendLine("useragent=" + p.UserAgent);
                 sb.AppendLine("proxy=" + p.Proxy);
                 sb.AppendLine("cookie=" + p.Cookie);
+                if (string.Equals(p.Name, "biquga-m", StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine("# mobilehost：移动版域名。只有站点自己换域名时才需要改；");
+                    sb.AppendLine("# 如果只是 m.biquga.com 在当前网络下连不上（HTTPS 握手被拒），");
+                    sb.AppendLine("# 请改用界面上的「笔趣阁（PC版·慢）」，换域名救不了（dindex 路径在 www 下是 PC 版页面）。");
+                    sb.AppendLine("mobilehost=" + p.MobileHost);
+                }
                 sb.AppendLine();
             }
             try { File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true)); }
@@ -282,6 +304,8 @@ namespace TomatoBiquga
             // 代理 / Cookie：空字符串也要写回去，否则上一本书设置的代理会残留到这一本
             Http.Proxy = p.Proxy ?? "";
             Http.Cookie = p.Cookie ?? "";
+            // 移动版域名覆盖（只有 [biquga-m] 会填）
+            if (!string.IsNullOrEmpty(p.MobileHost)) BiqugaMobileSite.SetHost(p.MobileHost);
         }
 
         public static string CurrentEncodingName(SiteProfile p)

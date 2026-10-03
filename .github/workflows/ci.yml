@@ -6,6 +6,10 @@ on:
     tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
+  # 每周一 03:00 UTC（北京时间 11:00）跑一次联网冒烟，尽早发现站点改版。
+  # 定时任务失败不会卡任何人 —— 见 live-smoke 那一节的说明。
+  schedule:
+    - cron: '0 3 * * 1'
 
 jobs:
   # ------------------------------------------------------------
@@ -35,6 +39,15 @@ jobs:
         run: |
           ./dist/_offlinetests.exe --verbose
           if ($LASTEXITCODE -ne 0) { throw "offline unit tests failed with exit code $LASTEXITCODE" }
+
+      # 端到端：造一整本书 → 导出 EPUB/Markdown → 把产物当外来文件重新打开验。
+      # 这一道专抓"零件都对、成品是坏的"（EPUB 目录曾经被写成每章一个卷标题，
+      # 而当时所有离线断言都是绿的）。
+      - name: Run end-to-end integration check (no network)
+        shell: pwsh
+        run: |
+          ./dist/_e2e.exe
+          if ($LASTEXITCODE -ne 0) { throw "e2e check failed with exit code $LASTEXITCODE" }
 
       # 再做一次独立的界面布局体检：3 个站点模式 × 4 种窗口尺寸，
       # 任何控件越界或互相重叠都直接失败（用户反馈的就是这类问题）。
@@ -81,6 +94,12 @@ jobs:
       - name: Build
         run: dotnet build build/NovelDownloader.csproj -c Release
 
+      - name: Build self-test tools
+        run: |
+          dotnet build build/NovelDownloader.Tests.csproj -c Release
+          dotnet build build/NovelDownloader.E2E.csproj -c Release
+          dotnet build build/NovelDownloader.LiveProbe.csproj -c Release
+
       - name: Package
         shell: pwsh
         run: |
@@ -90,8 +109,15 @@ jobs:
           Copy-Item README.md, NOTICE.md, LICENSE, start.bat, start.ps1 pkg/
           $zip = "novel-downloader-${{ github.ref_name }}-win64.zip"
           Compress-Archive -Path pkg/* -DestinationPath $zip -Force
-          Get-ChildItem pkg | Select-Object Name, Length
-          Get-Item $zip | Select-Object Name, Length
+
+          # 排障包：多带三个自测程序，下载出问题时用来定位（普通用户不需要）
+          New-Item -ItemType Directory -Force pkg-selftest | Out-Null
+          Copy-Item 'pkg/小说下载器.exe', dist/_offlinetests.exe, dist/_e2e.exe, dist/_liveprobe.exe pkg-selftest/
+          $zip2 = "novel-downloader-${{ github.ref_name }}-win64-selftest.zip"
+          Compress-Archive -Path pkg-selftest/* -DestinationPath $zip2 -Force
+
+          Get-ChildItem pkg, pkg-selftest | Select-Object Name, Length
+          Get-Item $zip, $zip2 | Select-Object Name, Length
 
       # 自检：包里必须正好是这 6 个文件，多了少了都直接失败。
       # （踩过的坑：v1.0.0 的包漏了 NOTICE.md —— 打包清单写死在这里就不会再漏）
@@ -111,10 +137,20 @@ jobs:
           if (-not (Test-Path (Join-Path $tmp 'start.ps1'))) { throw 'start.ps1 缺失，双击 start.bat 会失败' }
           Write-Host '包内容自检通过'
 
+          # 排障包至少要带上不联网的两个自测程序，否则用户没法自助定位
+          $tmp2 = Join-Path $env:RUNNER_TEMP 'verify2'
+          Expand-Archive -Path "novel-downloader-${{ github.ref_name }}-win64-selftest.zip" -DestinationPath $tmp2 -Force
+          foreach ($need in @('_offlinetests.exe', '_e2e.exe', '_liveprobe.exe')) {
+            if (-not (Test-Path (Join-Path $tmp2 $need))) { throw ("排障包缺少 " + $need) }
+          }
+          Write-Host '排障包内容自检通过'
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: novel-downloader-${{ github.ref_name }}-win64.zip
+          files: |
+            novel-downloader-${{ github.ref_name }}-win64.zip
+            novel-downloader-${{ github.ref_name }}-win64-selftest.zip
           generate_release_notes: true
           body: |
             ## 下载即用
@@ -122,7 +158,50 @@ jobs:
             解压后双击 `start.bat`（或直接双击 exe），无需安装、无需任何运行时
             （Windows 10 1903+ / 11 自带 .NET Framework 4.8）。
 
+            一般下 `...-win64.zip`（约 100 KB）。另有一个 `...-selftest.zip`，
+            多带三个自测程序（`_offlinetests` / `_e2e` / `_liveprobe`），
+            **下载出问题时**用它定位，提 issue 时把前两个的输出贴上来即可。
+
             ## 只做「解析公开网页 + 导出本地 TXT」
 
             不破解 DRM、不绕过登录或付费墙、不内置任何正文数据源。
             下载内容版权归原作者与发布站点，**仅供个人离线阅读，请勿传播**。
+
+  # ------------------------------------------------------------
+  #  定时联网冒烟（每周一次，也可以在 Actions 页手动触发）。
+  #
+  #  为什么不放进 build 门禁：联网任务会因为**站点侧的临时故障**而失败
+  #  （限流、CDN 抖动、改版），拿它卡 PR 只会让人习惯性忽略红灯。
+  #  它在这里的作用是"尽早发现站点变了"，失败了发通知、不阻塞任何人。
+  # ------------------------------------------------------------
+  live-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build live probe
+        run: dotnet build build/NovelDownloader.LiveProbe.csproj -c Release
+
+      - name: Probe site availability
+        shell: pwsh
+        # 站点探活本身"跑通"就算通过；某个站点不通不算失败（那是站点的事，
+        # 正好也验证了探活能正确报出原因）。
+        run: ./dist/_liveprobe.exe probe
+
+      - name: Cover extraction against the real detail page
+        shell: pwsh
+        # 这一步是真正会红的：它验证"请求真的发出去了 + 站点字段名没变"。
+        # curl 命令行写错导致所有请求失败那次，就是这类断言才能抓到。
+        run: |
+          ./dist/_liveprobe.exe cover "https://www.biquga.com/10_10333/"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning title=封面探针失败::站点结构或字段名可能变了，请检查 cover 这一步的输出"
+            exit 1
+          }

@@ -13,10 +13,17 @@ namespace TomatoBiquga
     /// 所以这里顺着每章页面里的“下一章”链接（var kkehvov）走完整本。
     /// 正文是 base64 存在 document.writeln(qsbs.bb('...')) 里。
     /// </summary>
-    public class BiqugaSite : ISite, ITextCacheProvider
+    public class BiqugaSite : ISite, ITextCacheProvider, IProbeable
     {
         public const string Origin = "https://www.biquga.com";
         public string Name { get { return "笔趣阁"; } }
+
+        /// <summary>探活：抓一次站点首页（域名/DNS/TLS 这一层通就算可用）</summary>
+        public string Probe()
+        {
+            var r = NetDiag.Probe(Origin + "/", Origin + "/");
+            return r.Ok ? null : NetDiag.Describe(r);
+        }
 
         /// <summary>目录遍历时顺路抓到的正文：key -> 文本</summary>
         private readonly Dictionary<string, string> _parsedText = new Dictionary<string, string>();

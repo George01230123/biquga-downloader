@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       联网实测探针（_liveprobe.exe）。**需要网络**，
+       因此**不进 PR 门禁** —— 它跑在 ci.yml 的定时任务里。
+
+       为什么它必须存在：有一类 bug 只在真的发出请求时才出现。
+       最典型的一次：curl 命令行末尾拼了 shell 重定向 `> 文件`，
+       而 UseShellExecute=false 时不经过 cmd.exe，`>` 被当成了 curl 的参数
+       → 每一次请求都返回 curl 退出码 3，程序完全不能用，
+       而当时 691 条离线单测**全绿**。
+
+       模式：cover / fanqie / export / typo / typooffline / probe
+       ============================================================ -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>_liveprobe</AssemblyName>
+    <RootNamespace>TomatoBiquga</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>..\dist\</OutputPath>
+    <StartupObject>LiveProbe</StartupObject>
+    <CodePage>65001</CodePage>
+    <NoWarn>1591;0618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\AssemblyInfo.cs" />
+    <Compile Include="..\src\Program.cs" />
+    <Compile Include="..\src\MainForm.cs" />
+    <Compile Include="..\src\Common\*.cs" />
+    <Compile Include="..\src\Sites\*.cs" />
+    <Compile Include="..\tools\LiveProbe.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

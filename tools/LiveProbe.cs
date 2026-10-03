@@ -54,18 +54,287 @@ internal static class LiveProbe
             if (mode == "cover") Cover(args);
             else if (mode == "fanqie") Fanqie(args);
             else if (mode == "export") Export(args);
-            else { Console.WriteLine("未知模式。可用：cover / fanqie / export"); return 1; }
+            else if (mode == "typo") Typo(args);
+            else if (mode == "typooffline") TypoOffline(args);
+            else if (mode == "probe") Probe(args);
+            else { Console.WriteLine("未知模式。可用：cover / fanqie / export / typo / typooffline / probe"); return 1; }
         }
         catch (Exception ex)
         {
             _fail++;
-            Console.WriteLine("[FAIL] 探针异常: " + ex.GetType().Name + " " + ex.Message);
+            Console.WriteLine("[FAIL] 探针异常: " + ex.GetType().Name + " " + ex.Message); Console.WriteLine(ex.StackTrace);
         }
 
         Console.WriteLine();
         Console.WriteLine(string.Format("通过 {0}/{1}", _pass, _pass + _fail));
         foreach (var f in Fails) Console.WriteLine("  " + f);
         return _fail == 0 ? 0 : 1;
+    }
+
+    // ------------------------------------------------------------ 站点探活
+
+    private static void Probe(string[] args)
+    {
+        Console.WriteLine("对三个站点各探活一次（各发 1 个请求）");
+        Console.WriteLine();
+        var sites = new ISite[] { new FanqieSite(), new BiqugaMobileSite(), new BiqugaSite() };
+        foreach (var s in sites)
+        {
+            var p = s as IProbeable;
+            Console.WriteLine("【" + s.Name + "】");
+            if (p == null) { Console.WriteLine("    （不支持探活）"); continue; }
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string reason = null;
+            try { reason = p.Probe(); }
+            catch (Exception ex) { reason = ex.Message; }
+            sw.Stop();
+
+            if (reason == null)
+            {
+                Console.WriteLine(string.Format("    可用（{0} ms）", sw.ElapsedMilliseconds));
+                _pass++;
+            }
+            else
+            {
+                Console.WriteLine("    不可用：" + reason);
+                _pass++;   // "探活本身工作正常"就算通过，站点不通不是探针的失败
+            }
+        }
+        Console.WriteLine();
+        Console.WriteLine("说明：探活能正确区分「站点通」与「不通且原因是什么」，");
+        Console.WriteLine("      站点本身不通不算探针失败。");
+    }
+
+    // ------------------------------------------------------------ 错字检测（离线双源）
+
+    /// <summary>
+    /// 用**目录缓存里的移动版正文**（PrefetchText 抓到的那份）当对照源，
+    /// 和 PC 版现场抓的正文比对。
+    ///
+    /// 为什么要有这个模式：移动版 (`m.biquga.com`) 在部分网络下不可用，
+    /// 那样就没法现场抓第二份。而移动版缓存文件里正好存着移动版的正文
+    /// （离线模式预抓的），它是**真正来自另一个源**的内容 —— 拿它做对照完全成立。
+    /// 这样就有一条"不依赖移动版可用"的双源比对验证路径。
+    ///
+    /// 用法: typooffline <下载根目录> <书名> <书dir> <cache目录> <cache site key> [章数]
+    ///   例: typooffline "%TEMP%\real-dl" 沧元图 10_10333 "dist\cache" biquga-m 5
+    /// </summary>
+    private static void TypoOffline(string[] args)
+    {
+        if (args.Length < 6)
+        {
+            Console.WriteLine("用法: typooffline <下载根目录> <书名> <书dir> <cache目录> <cache站点key> [章数=5]");
+            return;
+        }
+        string root = args[1], title = args[2], dirKey = args[3], cacheSrc = args[4], otherKey = args[5];
+        int limit = args.Length > 6 ? int.Parse(args[6]) : 5;
+
+        // 先把 cache 复制到探针同目录（DirCache 固定读 exe 同目录\cache）。
+        // 注意：不能用 File.Copy —— 缓存可能正被另一个进程写，
+        // File.Copy 不支持共享读，会直接抛"文件正由另一进程使用"。
+        var to = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cache");
+        Directory.CreateDirectory(to);
+        foreach (var f in Directory.GetFiles(cacheSrc, otherKey + "_" + dirKey + ".json"))
+            File.WriteAllText(Path.Combine(to, Path.GetFileName(f)),
+                DirCache.ReadAllTextShared(f), new UTF8Encoding(false));
+
+        var otherBook = DirCache.Load(otherKey, dirKey);
+        Chk("对照源缓存载入（" + otherKey + "）", otherBook != null && otherBook.Chapters.Count > 0,
+            otherBook == null ? "null" : otherBook.Chapters.Count.ToString());
+        if (otherBook == null) return;
+        Console.WriteLine("    对照源：《" + otherBook.Title + "》 " + otherBook.Chapters.Count + " 章");
+
+        // 主源：PC 版现场抓
+        var pc = new BiqugaSite { CrawlWorkers = 6 };
+        var stub = new BookInfo { Site = "biquga", Dir = "/" + dirKey, Url = BiqugaSite.Origin + "/" + dirKey + "/" };
+        var book = pc.LoadBook(stub, m => Console.WriteLine("    [目录] " + m));
+        Chk("主源目录载入", book != null && book.Chapters.Count > 0);
+        if (book == null) return;
+
+        // 正文：PC 版按需抓（这里只抓前 N 章，所以不触发整本遍历）
+        Console.WriteLine();
+        Console.WriteLine("开始双源比对（主源=PC 现场抓，对照源=" + otherKey + " 缓存正文）");
+        var result = new TypoFinder.Result { Title = book.Title, OtherSource = otherKey + "（缓存正文）" };
+        int n = 0, done = 0;
+        foreach (var c in book.Chapters)
+        {
+            if (c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
+            if (n >= limit) break;
+            if (done >= limit) break;
+
+            // 对照源里找同一个 cid
+            ChapterInfo oc = null;
+            foreach (var x in otherBook.Chapters) if (x.Id == c.Id) { oc = x; break; }
+            if (oc == null) { Console.WriteLine("    " + c.Title + " —— 对照源没有这个 cid，跳过"); continue; }
+            n++;
+
+            string primary = null, other = null;
+            try { primary = pc.LoadChapter(book, c, null); }
+            catch (Exception ex) { Console.WriteLine("    主源抓取失败: " + ex.Message); }
+            other = oc.Text;
+
+            if (string.IsNullOrEmpty(primary) || string.IsNullOrEmpty(other))
+            {
+                result.ComparedChapters++;
+                result.SkippedChapters++;
+                Console.WriteLine("    " + c.Title + " —— 有一边没内容，跳过");
+                continue;
+            }
+
+            done++;
+            result.ComparedChapters++;
+            var diffs = TypoFinder.CompareChapter(c.Title, primary, other);
+            if (diffs.Count == 0)
+            {
+                result.IdenticalChapters++;
+                Console.WriteLine("    " + c.Title + " —— 一致");
+            }
+            else
+            {
+                result.Diffs.AddRange(diffs);
+                result.PerChapter[c.Title] = diffs.Count;
+                Console.WriteLine("    " + c.Title + " —— " + diffs.Count + " 处差异");
+                for (int k = 0; k < diffs.Count && k < 4; k++)
+                {
+                    var d = diffs[k];
+                    Console.WriteLine(string.Format("          @{0}  PC[{1}]  移动[{2}]   上下文 {3}",
+                        d.Position, d.Primary, d.Other, d.Context));
+                }
+                if (diffs.Count > 4) Console.WriteLine("          …还有 " + (diffs.Count - 4) + " 处");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(result.Summary());
+        Chk("双源比对跑通（至少比了 1 章）", result.ComparedChapters > 0, result.ComparedChapters.ToString());
+
+        string bookDir, txtPath;
+        DownloadRunner.ResolvePaths(root, title, out bookDir, out txtPath);
+        var rep = Path.Combine(bookDir, "错字检测报告.txt");
+        File.WriteAllText(rep, TypoFinder.BuildReport(book, result, txtPath, result.OtherSource), new UTF8Encoding(true));
+        File.WriteAllText(Path.Combine(bookDir, "错字检测报告.csv"), TypoFinder.BuildCsv(result), new UTF8Encoding(true));
+        Console.WriteLine("报告：" + rep);
+
+        if (result.ComparedChapters > 0)
+            Console.WriteLine(string.Format("一致率：{0:P0}（{1}/{2} 章）",
+                (double)result.IdenticalChapters / result.ComparedChapters,
+                result.IdenticalChapters, result.ComparedChapters));
+    }
+
+    // ------------------------------------------------------------ 错字检测（双源比对）
+
+    private static void Typo(string[] args)
+    {
+        // 用法: typo <下载根目录> <书名> <对照站点key> [比对的章数] [cache目录]
+        if (args.Length < 4)
+        {
+            Console.WriteLine("用法: typo <下载根目录> <书名> <对照站点> [章数=10] [cache目录]");
+            Console.WriteLine("  对照站点：biquga（PC）或 biquga-m（移动版）");
+            return;
+        }
+        string root = args[1], title = args[2], otherKey = args[3];
+        int limit = args.Length > 4 ? int.Parse(args[4]) : 10;
+        string cacheSrc = args.Length > 5 ? args[5] : null;
+
+        string bookDir, txtPath;
+        DownloadRunner.ResolvePaths(root, title, out bookDir, out txtPath);
+        Console.WriteLine("主源 txt：" + txtPath);
+        if (!File.Exists(txtPath)) { Chk("找到主源 txt", false, txtPath); return; }
+        Chk("找到主源 txt", true);
+
+        // 目录缓存
+        var book = DirCache.Load("biquga", "10_10333");
+        if (book == null && cacheSrc != null && Directory.Exists(cacheSrc))
+        {
+            var to = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cache");
+            Directory.CreateDirectory(to);
+            foreach (var f in Directory.GetFiles(cacheSrc, "biquga_10_10333.json"))
+                File.WriteAllText(Path.Combine(to, Path.GetFileName(f)),
+                    DirCache.ReadAllTextShared(f), new UTF8Encoding(false));
+            book = DirCache.Load("biquga", "10_10333");
+        }
+        Chk("目录缓存载入", book != null && book.Chapters.Count > 0);
+        if (book == null) return;
+
+        // 主源正文：走界面同一份解析
+        var mi = typeof(MainForm).GetMethod("ParseTxtIntoChapters", BindingFlags.NonPublic | BindingFlags.Static);
+        Chk("找到 MainForm.ParseTxtIntoChapters", mi != null);
+        if (mi == null) return;
+        var primary = (List<ChapterInfo>)mi.Invoke(null, new object[] { txtPath, book });
+        Chk("主源解析出章节", primary != null && primary.Count > 0,
+            primary == null ? "null" : primary.Count.ToString());
+        if (primary == null || primary.Count == 0) return;
+        Console.WriteLine("    主源 " + primary.Count + " 章有正文");
+
+        // 对照源：同一个站点类型，重新抓这些章
+        var other = otherKey == "biquga-m"
+            ? (ISite)new BiqugaMobileSite { Workers = 6 }
+            : (ISite)new BiqugaSite { CrawlWorkers = 6 };
+
+        Console.WriteLine();
+        Console.WriteLine("对照源：" + other.Name + "（重新抓取，只抓前 " + limit + " 章）");
+        var result = new TypoFinder.Result { Title = book.Title, OtherSource = other.Name };
+        int n = 0;
+        foreach (var c in primary)
+        {
+            if (n >= limit) break;
+            n++;
+            // 对照源用的是同一个 cid（同一本书 id 一样），所以可以直接按 Id 抓
+            string text = null;
+            try { text = other.LoadChapter(book, c, null); }
+            catch (Exception ex) { Console.WriteLine("    [" + n + "] " + c.Title + " 抓取失败：" + ex.Message); }
+
+            result.ComparedChapters++;
+            if (string.IsNullOrEmpty(text))
+            {
+                result.SkippedChapters++;
+                Console.WriteLine("    [" + n + "] " + c.Title + " —— 对照源没有内容，跳过");
+                continue;
+            }
+
+            var diffs = TypoFinder.CompareChapter(c.Title, c.Text, text);
+            if (diffs.Count == 0)
+            {
+                result.IdenticalChapters++;
+                Console.WriteLine("    [" + n + "] " + c.Title + " —— 一致");
+            }
+            else
+            {
+                result.Diffs.AddRange(diffs);
+                result.PerChapter[c.Title] = diffs.Count;
+                Console.WriteLine("    [" + n + "] " + c.Title + " —— " + diffs.Count + " 处差异");
+                for (int k = 0; k < diffs.Count && k < 3; k++)
+                {
+                    var d = diffs[k];
+                    Console.WriteLine(string.Format("          @{0} 主源[{1}] 对照[{2}]",
+                        d.Position, d.Primary, d.Other));
+                }
+                if (diffs.Count > 3) Console.WriteLine("          …还有 " + (diffs.Count - 3) + " 处");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(result.Summary());
+        Chk("双源比对跑通（至少比了 1 章）", result.ComparedChapters > 0, result.ComparedChapters.ToString());
+
+        // 写报告
+        var rep = Path.Combine(bookDir, "错字检测报告.txt");
+        File.WriteAllText(rep, TypoFinder.BuildReport(book, result, txtPath, other.Name), new UTF8Encoding(true));
+        var csv = Path.Combine(bookDir, "错字检测报告.csv");
+        File.WriteAllText(csv, TypoFinder.BuildCsv(result), new UTF8Encoding(true));
+        Console.WriteLine("报告：" + rep);
+        Console.WriteLine("CSV ：" + csv);
+
+        // 结果解读：一致率太低通常说明"这两个源差别很大"，而不是"错字多"
+        if (result.ComparedChapters > 0)
+        {
+            double sameRatio = (double)result.IdenticalChapters / result.ComparedChapters;
+            Console.WriteLine(string.Format("一致率：{0:P0}（{1}/{2} 章）",
+                sameRatio, result.IdenticalChapters, result.ComparedChapters));
+            if (sameRatio < 0.3)
+                Console.WriteLine("提示：一致率偏低，多半是两个源本身的排版/版本差异较大，不一定是错字多。");
+        }
     }
 
     // ------------------------------------------------------------ 封面
@@ -202,8 +471,11 @@ internal static class LiveProbe
         {
             var to = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cache");
             Directory.CreateDirectory(to);
+            // 用 ReadAllTextShared 而不是 File.Copy：缓存可能正被另一个进程写，
+            // File.Copy 不支持共享读，会抛"文件正由另一进程使用"。
             foreach (var f in Directory.GetFiles(args[3], "biquga_10_10333.json"))
-                File.Copy(f, Path.Combine(to, Path.GetFileName(f)), true);
+                File.WriteAllText(Path.Combine(to, Path.GetFileName(f)),
+                    DirCache.ReadAllTextShared(f), new UTF8Encoding(false));
             book = DirCache.Load("biquga", "10_10333");
         }
         Chk("目录缓存载入成功", book != null && book.Chapters.Count > 0,

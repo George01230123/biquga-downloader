@@ -65,4 +65,17 @@ namespace TomatoBiquga
     {
         string GetCachedText(string cid);
     }
+
+    /// <summary>
+    /// 站点探活：不抓内容，只回答"这个域名现在通不通、不通是什么原因"。
+    ///
+    /// 用途是**站点自动降级**：用户看不懂
+    /// `schannel: failed to receive handshake`，但看得懂
+    /// "移动版当前不可用（HTTPS 被站点拒绝），已改用 PC 版"。
+    /// </summary>
+    public interface IProbeable
+    {
+        /// <summary>探活一次。返回 null = 正常；否则返回一句给用户看的原因。</summary>
+        string Probe();
+    }
 }

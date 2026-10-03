@@ -25,6 +25,9 @@ namespace TomatoBiquga
     {
         public const string FileName = "书架.json";
 
+        /// <summary>任务队列的落盘文件（放 exe 同目录，和书架并列）</summary>
+        public const string QueueFileName = "队列.json";
+
         /// <summary>一条书架记录</summary>
         public class Entry
         {
@@ -358,6 +361,100 @@ namespace TomatoBiquga
                 }
             }
             return sb.ToString();
+        }
+
+        // ---------------------------------------------------------- 任务队列的持久化
+
+        /// <summary>
+        /// 任务队列的落盘路径。
+        /// 为什么队列要落盘：队列是"睡前排 5 本"这种用法，
+        /// 而 QueueDialog 一关内容就没了 —— 误点关闭、程序崩一次，排好的队全白费。
+        /// </summary>
+        public static string QueuePath
+        {
+            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, QueueFileName); }
+        }
+
+        /// <summary>存队列（每行一本书名/地址）。空列表会删掉文件而不是存个空文件。</summary>
+        public static bool SaveQueue(List<string> lines)
+        {
+            return SaveQueue(QueuePath, lines);
+        }
+
+        public static bool SaveQueue(string path, List<string> lines)
+        {
+            try
+            {
+                if (lines == null || lines.Count == 0)
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                    return true;
+                }
+                var sb = new StringBuilder();
+                sb.Append("{\n  \"note\": \"任务队列（每项一行）。程序关闭时会自动写这里，下次打开队列窗口自动带回。\",\n");
+                sb.Append("  \"savedAt\": ").Append(J(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))).Append(",\n");
+                sb.Append("  \"items\": [\n");
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    sb.Append("    ").Append(J(lines[i]));
+                    if (i < lines.Count - 1) sb.Append(',');
+                    sb.Append('\n');
+                }
+                sb.Append("  ]\n}\n");
+
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>读队列。文件不存在或损坏 → 空列表（不抛异常）。</summary>
+        public static List<string> LoadQueue()
+        {
+            return LoadQueue(QueuePath);
+        }
+
+        public static List<string> LoadQueue(string path)
+        {
+            var list = new List<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return list;
+                var text = ReadAllTextShared(path);
+                int at = text.IndexOf("\"items\"", StringComparison.Ordinal);
+                if (at < 0) return list;
+                int arr = text.IndexOf('[', at);
+                if (arr < 0) return list;
+
+                // 提取数组里的每个字符串（复用 SkipString/Unescape，不引解析器）
+                int i = arr + 1;
+                while (i < text.Length)
+                {
+                    char c = text[i];
+                    if (c == ']') break;
+                    if (c == '"')
+                    {
+                        int end = SkipString(text, i);
+                        var raw = text.Substring(i + 1, Math.Max(0, end - i - 2));
+                        var s = Unescape(raw).Trim();
+                        if (s.Length > 0) list.Add(s);
+                        i = end;
+                        continue;
+                    }
+                    i++;
+                }
+            }
+            catch { /* 队列文件坏了就当空的，绝不因此起不来 */ }
+            return list;
+        }
+
+        /// <summary>共享读（队列文件可能正被写）</summary>
+        private static string ReadAllTextShared(string path)
+        {
+            return DirCache.ReadAllTextShared(path);
         }
     }
 }

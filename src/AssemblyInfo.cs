@@ -23,8 +23,8 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.1.1：v1.1.0 的联网实测修了三个 bug（curl 命令行导致所有请求失败、
-//        番茄封面字段名、目录缓存漏存封面/字数），所以补一个修订版。
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
-[assembly: AssemblyInformationalVersion("1.1.1")]
+// 1.2.0：站点探活与自动降级、错字检测（双源比对）、队列持久化、
+//        书架搜索/一键检查更新、导出时繁简转换、磁盘空间预检、CI 定时联网冒烟。
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyInformationalVersion("1.2.0")]

@@ -21,10 +21,55 @@ namespace TomatoBiquga
     /// 正文同样是 base64 塞在 document.writeln(qsbs.bb('...')) 里，解码逻辑与 PC 版一致；
     /// 章内分页同样是 cid.html → cid_1.html → cid_2.html，并发抓取。
     /// </summary>
-    public class BiqugaMobileSite : ISite, ITextCacheProvider
+    public class BiqugaMobileSite : ISite, ITextCacheProvider, IProbeable
     {
-        public const string Host = "https://m.biquga.com";
+        /// <summary>
+        /// 移动版域名。**可运行时修改**（原来是 const）。
+        ///
+        /// 为什么改成可配：这个域名是站点方随时会动的东西 ——
+        /// 实测过 `m.biquga.com` 被 CDN 按 SNI 拒掉 TLS 握手（curl 退出码 35），
+        /// 而 www 域名正常。当时因为它是 const，运行时改不了，
+        /// 用户只能改代码重新编译。现在可以在站点配置里覆盖：
+        ///
+        ///   [biquga-m]
+        ///   mobilehost=https://m.biquga.com
+        ///
+        /// 注意：换域名**不会**把移动版的快速目录路径带过去 ——
+        /// 实测 `www.biquga.com/{dir}/dindex_1.html` 返回的是 PC 版的页面
+        /// （22KB / 8 页 / 只解析出 2 个链接），不是移动版那种"每页 100 章"的结构。
+        /// 所以这个配置是给"站点换域名"用的，不是给"绕过某个域名不可用"用的；
+        /// 后者请直接用 PC 版站点（见 MainForm 的站点探活/降级）。
+        /// </summary>
+        public static string Host = "https://m.biquga.com";
+
+        /// <summary>把 Host 归一化：去尾部斜杠、补协议；非法值回退默认</summary>
+        public static void SetHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) { Host = DefaultHost; return; }
+            var h = host.Trim().TrimEnd('/');
+            if (h.IndexOf("://", StringComparison.Ordinal) < 0) h = "https://" + h;
+            if (!h.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !h.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                Host = DefaultHost;
+                return;
+            }
+            Host = h;
+        }
+
+        public const string DefaultHost = "https://m.biquga.com";
+
         public string Name { get { return "笔趣阁(移动版·快)"; } }
+
+        /// <summary>
+        /// 探活：抓一次站点首页。只要首页能通，就说明域名/DNS/TLS 这一层没问题
+        /// （目录页要带 dir，首页不需要，所以用首页做探活最省事也最不容易误判）。
+        /// </summary>
+        public string Probe()
+        {
+            var r = NetDiag.Probe(Host + "/", Host + "/");
+            return r.Ok ? null : NetDiag.Describe(r);
+        }
 
         /// <summary>并发下载线程数</summary>
         public int Workers = 8;

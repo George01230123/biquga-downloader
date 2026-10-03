@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ============================================================
+       端到端集成校验的控制台工程（CI 靠它编译 + 运行）。
+       对应 build.bat 里的 _e2e.exe。**不联网**，可以在任何 runner 上跑。
+
+       它检查的是"成品"：造一整本书（分卷 + 封面 + 繁体）→ 导出 EPUB/Markdown
+       → 把产物当外来文件重新打开验（mimetype 顺序、每个 XML 真解析、
+       封面字节在位、目录嵌套精确计数）。
+
+       为什么单独一个工程：它有自己的 Main，混进 Tests 工程会和
+       OfflineTests 的入口冲突（Probe 工程是同样的理由）。
+       ============================================================ -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>_e2e</AssemblyName>
+    <RootNamespace>TomatoBiquga</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>..\dist\</OutputPath>
+    <StartupObject>E2E</StartupObject>
+    <CodePage>65001</CodePage>
+    <NoWarn>1591;0618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\AssemblyInfo.cs" />
+    <Compile Include="..\src\Program.cs" />
+    <Compile Include="..\src\MainForm.cs" />
+    <Compile Include="..\src\Common\*.cs" />
+    <Compile Include="..\src\Sites\*.cs" />
+    <Compile Include="..\tests\E2E.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

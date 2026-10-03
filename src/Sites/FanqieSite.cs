@@ -12,10 +12,24 @@ namespace TomatoBiquga
     /// 但正文把常用字替换成了私用区字符（配一个 bytetos 反爬字体），
     /// 这里用内置的“私用区 → 真字”映射表还原。
     /// </summary>
-    public class FanqieSite : ISite
+    public class FanqieSite : ISite, IProbeable
     {
         public const string Origin = "https://fanqienovel.com";
         public string Name { get { return "番茄小说"; } }
+
+        /// <summary>
+        /// 探活：番茄的目录 JSON 接口很轻，直接探它 ——
+        /// 探首页也能通，但目录接口才是这个工具真正要用的那一个，
+        /// 而番茄的**风控恰好卡在正文接口上**，目录接口通常是通的。
+        /// 这里只判断"站点在不在"，风控留到真正下载时再报（那时提示更准确）。
+        /// </summary>
+        public string Probe()
+        {
+            var r = NetDiag.Probe(Origin + "/api/reader/directory/detail?bookId=1", Origin + "/");
+            // 番茄对不存在的 bookId 会返回 200 + 错误 JSON，所以只要"请求成功"就算站点可用，
+            // 内容是不是有效目录不在这里判断
+            return r.Ok ? null : NetDiag.Describe(r);
+        }
 
         /// <summary>为 true 时忽略本地目录缓存</summary>
         public bool ForceRefresh = false;

@@ -296,7 +296,15 @@ namespace TomatoBiquga
                             var t = FetchWithDotNet(url, body, referer);
                             if (!string.IsNullOrEmpty(t)) { LastBackend = ".NET(回退)"; return t; }
                         }
-                        catch (Exception ex2) { last = ex2; }
+                        catch (Exception ex2)
+                        {
+                            // ★ 这里必须**保留原来的 curl 错误**，不能只用 ex2 覆盖。
+                            // curl 的失败原因是有诊断价值的（退出码 → TLS/DNS/超时），
+                            // 而 .NET 回退失败往往只是一句笼统的"连接被意外关闭"。
+                            // 早先直接 last = ex2，结果站点探活只能报出"请求失败"，
+                            // 完全帮不到用户。现在两个都留着。
+                            last = new Exception(ex.Message + "；换用内置 .NET 请求也失败：" + ex2.Message);
+                        }
                     }
                     if (attempt < MaxRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
                 }

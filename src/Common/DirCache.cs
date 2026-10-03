@@ -30,6 +30,29 @@ namespace TomatoBiquga
             return Path.Combine(CacheDir, site + "_" + Http.SafeFileName(key) + ".json");
         }
 
+        /// <summary>
+        /// 以共享方式读文本，并在被占用时重试几次。
+        /// 慢一点没关系 —— 读缓存是"顺路优化"，绝不能因为它抛异常把主流程带崩。
+        /// </summary>
+        internal static string ReadAllTextShared(string path)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete))
+                    using (var sr = new StreamReader(fs, Encoding.UTF8))
+                        return sr.ReadToEnd();
+                }
+                catch (IOException)
+                {
+                    if (attempt >= 4) throw;
+                    System.Threading.Thread.Sleep(120 * (attempt + 1));
+                }
+            }
+        }
+
         private class CachedChapter
         {
             public string id { get; set; }
@@ -65,7 +88,11 @@ namespace TomatoBiquga
                 var path = PathFor(site, key);
                 if (!File.Exists(path)) return null;
                 var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                var cb = ser.Deserialize<CachedBook>(File.ReadAllText(path, Encoding.UTF8));
+                // 用 FileShare.ReadWrite 打开：缓存文件可能正被**另一个进程**写入
+                // （比如界面在跑离线预抓、同时命令行工具在读），
+                // File.ReadAllText 默认只允许共享读，会直接抛
+                // "文件正由另一进程使用"。共享打开 + 失败重试更稳。
+                var cb = ser.Deserialize<CachedBook>(ReadAllTextShared(path));
                 if (cb == null || cb.chapters == null || cb.chapters.Count == 0) return null;
 
                 var book = new BookInfo

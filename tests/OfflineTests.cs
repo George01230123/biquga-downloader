@@ -162,6 +162,12 @@ namespace TomatoBiquga
                 // 简繁转换（字表全部内联，无外部数据文件）
                 TestZhConvert();
                 TestZhConvertLi();
+                // 错字检测（双源比对）
+                TestTypoFinder();
+                // 网络错误归因与磁盘空间检查
+                TestNetDiag();
+                // 任务队列持久化
+                TestQueuePersistence(work);
             }
             catch (Exception ex)
             {
@@ -861,6 +867,8 @@ namespace TomatoBiquga
                                 // 点名检查的价值就在这：漏加进面板的按钮"不越界也不重叠"，
                                 // 光靠几何检查发现不了（历史上真漏过）。
                                 "书架", "任务队列", "检查更新",
+                                // 第三批：站点探活 + 错字检测（双源比对）
+                                "检测站点", "检测错字",
                             })
                             {
                                 Check("按钮在位：" + want + "（" + where + "）", texts.Contains(want));
@@ -2312,6 +2320,263 @@ namespace TomatoBiquga
             Eq("状态码：000（curl 连接失败）→ 0", 0, Http.ParseHttpCode("000"));
             Eq("状态码：99 不合法 → 0", 0, Http.ParseHttpCode("99"));
             Eq("状态码：600 不合法 → 0", 0, Http.ParseHttpCode("600"));
+        }
+
+        // ============================================================
+        //  14) 错字检测（双源比对）
+        // ============================================================
+
+        /// <summary>
+        /// 错字检测的核心逻辑。
+        ///
+        /// 这类算法的断言必须**双向**：既"该找到的一个不漏"，也"不该报的一个不报"。
+        /// 所以除了"注入 N 个错字 → 正好找到那 N 处"，还专门测了
+        /// "完全一致 → 0 处"和"只有空白差异 → 0 处" ——
+        /// 后者尤其重要：两个源对空行/全角空格的处理不一样，
+        /// 不归一化的话每段空行都会被报成一处差异，报告直接没法看。
+        /// </summary>
+        private static void TestTypoFinder()
+        {
+            // --- 1) 完全一致：必须 0 处差异 ---
+            var same = "他后来发现，这里的时间过得很快。\n他决定明天再去看看。";
+            Eq("错字：完全一致 → 0 处", 0, TypoFinder.CompareChapter("第一章", same, same).Count);
+
+            // --- 2) 只有空白/换行差异 → 必须 0 处 ---
+            var a1 = "第一段。\n\n第二段。\n第三段。";
+            var b1 = "第一段。\r\n \r\n第二段。\r\n　\r\n第三段。";   // 多空行 + 全角空格
+            Eq("错字：只差空白 → 0 处", 0, TypoFinder.CompareChapter("第一章", a1, b1).Count);
+
+            // --- 3) 注入单字差异：必须精确定位，且两边写法都拿到 ---
+            var a2 = "他后来发现，这里的时间过得很快。";
+            var b2 = "他后来发現，这里的时间过得很快。";     // 现 → 現
+            var d2 = TypoFinder.CompareChapter("第二章", a2, b2);
+            Eq("错字：单字差异 → 1 处", 1, d2.Count);
+            if (d2.Count == 1)
+            {
+                Eq("错字：主源写法", "现", d2[0].Primary);
+                Eq("错字：对照源写法", "現", d2[0].Other);
+                Eq("错字：类型是用字不同", TypoFinder.DiffKind.Replace, d2[0].Kind);
+                Check("错字：位置是主源里的下标", d2[0].Position > 0 && d2[0].Position < a2.Length);
+                Check("错字：带上下文", d2[0].Context.IndexOf("现", StringComparison.Ordinal) >= 0);
+            }
+
+            // --- 4) 多处差异：数量要对得上 ---
+            var a3 = "我们都说他是一个好人，从来没有见过这样的人。";
+            var b3 = "我们都說他是一个好人，从来没有見过这样的人。";   // 说→說, 见→見
+            Eq("错字：两处差异 → 2 处", 2, TypoFinder.CompareChapter("第三章", a3, b3).Count);
+
+            // --- 5) 漏字 / 多字：类型要区分开 ---
+            var a4 = "今天天气很好，我们出去走走吧。";
+            var b4 = "今天天气很好，我们出去吧。";        // 对照源少了"走走"
+            var d4 = TypoFinder.CompareChapter("第四章", a4, b4);
+            Eq("错字：漏字 → 1 处", 1, d4.Count);
+            if (d4.Count == 1)
+            {
+                Eq("错字：漏字类型", TypoFinder.DiffKind.ExtraInPrimary, d4[0].Kind);
+                Eq("错字：漏掉的内容", "走走", d4[0].Primary);
+                Eq("错字：对照源这边为空", "", d4[0].Other);
+            }
+
+            var a5 = "今天天气很好，我们出去吧。";
+            var b5 = "今天天气很好，我们出去走走吧。";     // 对照源多了"走走"
+            var d5 = TypoFinder.CompareChapter("第五章", a5, b5);
+            Eq("错字：多字 → 1 处", 1, d5.Count);
+            if (d5.Count == 1)
+                Eq("错字：多字类型", TypoFinder.DiffKind.MissingInPrimary, d5[0].Kind);
+
+            // --- 6) 长度差过大：标成"疑似站点差异"，而不是逐字报一堆 ---
+            var a6 = "短。";
+            var sb6 = new StringBuilder();
+            for (int i = 0; i < 400; i++) sb6.Append("这一章在另一个源里长得多，多半是站点排版或广告差异。");
+            var d6 = TypoFinder.CompareChapter("第六章", a6, sb6.ToString());
+            Eq("错字：长度差过大 → 只报 1 条汇总", 1, d6.Count);
+            if (d6.Count == 1)
+                Contains("错字：汇总里说明是站点差异", d6[0].Context, "疑似站点差异");
+
+            // --- 7) 空内容不能抛异常 ---
+            Eq("错字：两边都空 → 0 处", 0, TypoFinder.CompareChapter("x", "", "").Count);
+            Eq("错字：主源空 → 0 处", 0, TypoFinder.CompareChapter("x", null, "有内容").Count);
+            Eq("错字：对照源空 → 0 处", 0, TypoFinder.CompareChapter("x", "有内容", null).Count);
+
+            // --- 8) 差异爆量要封顶，不能把报告刷爆 ---
+            var big1 = new StringBuilder();
+            var big2 = new StringBuilder();
+            for (int i = 0; i < 900; i++) { big1.Append('甲'); big2.Append('乙'); }
+            var d8 = TypoFinder.CompareChapter("第七章", big1.ToString(), big2.ToString());
+            Check("错字：差异数量有上限（≤ " + TypoFinder.MaxDiffsPerChapter + "）",
+                d8.Count <= TypoFinder.MaxDiffsPerChapter);
+
+            // --- 9) 报告与 CSV ---
+            var r = new TypoFinder.Result { Title = "报告测试", OtherSource = "对照源" };
+            r.ComparedChapters = 3;
+            r.IdenticalChapters = 1;
+            r.SkippedChapters = 0;
+            r.Diffs.AddRange(d2);
+            r.Diffs.AddRange(d4);
+            var book = new BookInfo { Title = "报告测试", Author = "作者" };
+            var report = TypoFinder.BuildReport(book, r, @"C:\x\y.txt", "对照源");
+            Contains("错字报告：含书名", report, "报告测试");
+            Contains("错字报告：含对照源", report, "对照源");
+            Contains("错字报告：含汇总行", report, "比对 3 章");
+            Contains("错字报告：如实说明两源都错时测不出来", report, "两个源都错同一个字时检测不出来");
+            Contains("错字报告：分组标题", report, "最可能是错字");
+
+            var csv = TypoFinder.BuildCsv(r);
+            Contains("错字 CSV：有表头", csv, "章节,位置,类型,主源,对照源,上下文");
+            Contains("错字 CSV：有用字不同类型", csv, "用字不同");
+
+            // CSV 转义：含逗号/引号的字段必须转义，否则 Excel 会串列
+            var rCsv = new TypoFinder.Result { Title = "t" };
+            rCsv.Diffs.Add(new TypoFinder.Diff { Chapter = "a,b", Primary = "c\"d", Other = "e" });
+            var csv2 = TypoFinder.BuildCsv(rCsv);
+            Contains("错字 CSV：含逗号的字段被引号包住", csv2, "\"a,b\"");
+            Contains("错字 CSV：引号被转义成两个", csv2, "\"\"");
+        }
+
+        // ============================================================
+        //  15) 网络错误归因 + 磁盘空间检查
+        // ============================================================
+
+        /// <summary>
+        /// 把网络错误翻译成人话。
+        ///
+        /// 为什么这个值得测：用户看到 `curl 退出码 35` 是完全无助的 ——
+        /// 他不知道是网络坏了、站点挂了、还是要挂代理，更不知道**换个站点就能用**。
+        /// 归因错了比不归因更糟（会把人带偏），所以这里逐条钉住 curl 退出码的映射。
+        /// </summary>
+        private static void TestNetDiag()
+        {
+            string advice;
+
+            // curl 退出码 → 归因（这些码的语义来自 curl 文档）
+            Eq("归因：6 = 域名解析失败", "域名解析失败", NetDiag.Classify(6, "", out advice));
+            Check("归因：6 给出可操作建议", advice.Length > 0);
+            Eq("归因：7 = 连不上", "连不上服务器（端口被拒或网络不通）", NetDiag.Classify(7, "", out advice));
+            Eq("归因：28 = 超时", "请求超时", NetDiag.Classify(28, "", out advice));
+            Eq("归因：35 = HTTPS 握手被拒", "HTTPS 握手被拒绝", NetDiag.Classify(35, "", out advice));
+            // 35 是最容易让用户误以为是"自己网络坏了"的那一个，建议里必须说清是站点侧
+            NetDiag.Classify(35, "", out advice);
+            Contains("归因：35 明确指出不是用户网络的问题", advice, "不是你的网络问题");
+            Contains("归因：35 建议换站点", advice, "换个站点");
+            Eq("归因：60 = 证书校验失败", "证书校验失败", NetDiag.Classify(60, "", out advice));
+            Eq("归因：56 = 连接被重置", "接收数据失败（连接被重置）", NetDiag.Classify(56, "", out advice));
+            Eq("归因：3 = URL 格式错误（指向程序自身问题）",
+                "URL 格式错误", NetDiag.Classify(3, "", out advice));
+            Contains("归因：3 提示贴日志到 issue", advice, "issue");
+
+            // 退出码没命中时看文本特征
+            Eq("归因：文本含 schannel → TLS",
+                "HTTPS 握手失败", NetDiag.Classify(0, "schannel: failed to receive handshake", out advice));
+            Eq("归因：文本含无法解析 → DNS",
+                "域名解析失败", NetDiag.Classify(0, "无法解析主机名", out advice));
+            Eq("归因：文本含限流 → 限流",
+                "被站点限流", NetDiag.Classify(0, "访问太频繁", out advice));
+
+            // 归不出来必须返回空（让调用方原样显示），**绝不能瞎猜**
+            Eq("归因：认不出来 → 空串", "", NetDiag.Classify(0, "某个没见过的错误", out advice));
+            Eq("归因：空错误 → 空串", "", NetDiag.Classify(0, "", out advice));
+            Eq("归因：退出码 0 且无文本 → 空串", "", NetDiag.Classify(0, null, out advice));
+
+            // 从异常文本里挖 curl 退出码
+            Eq("退出码提取：从 Http 的异常文本里挖出来", 35,
+                NetDiag.ExtractCurlExit("请求失败（已重试 3 次）：https://x\n  curl 退出码 35"));
+            Eq("退出码提取：没有则 0", 0, NetDiag.ExtractCurlExit("就是失败了"));
+            Eq("退出码提取：null → 0", 0, NetDiag.ExtractCurlExit(null));
+            Eq("退出码提取：两位数也对", 28, NetDiag.ExtractCurlExit("curl 退出码 28："));
+
+            // 磁盘空间估算
+            var e1 = DiskCheck.EstimateBytes(1000, false);
+            Check("磁盘估算：1000 章 > 2MB（" + e1 + "）", e1 > 2 * 1024 * 1024);
+            Check("磁盘估算：0 章 = 0", DiskCheck.EstimateBytes(0, false) == 0);
+            Check("磁盘估算：负数按 0 处理", DiskCheck.EstimateBytes(-5, false) == 0);
+            Check("磁盘估算：含 EPUB 时更大",
+                DiskCheck.EstimateBytes(1000, true) > DiskCheck.EstimateBytes(1000, false));
+
+            // 真实盘符检查：需求极小 → 必须 Ok（不能因为查空间就不让下载）
+            var ok = DiskCheck.Check(AppDomain.CurrentDomain.BaseDirectory, 1024);
+            Check("磁盘检查：需求极小时判定为够", ok.Ok);
+            Check("磁盘检查：能报出可用空间（" + ok.FreeBytes + "）", ok.FreeBytes > 0);
+
+            // 需求离谱地大 → 必须报不够，并且给出人话提示
+            var bad = DiskCheck.Check(AppDomain.CurrentDomain.BaseDirectory, long.MaxValue / 4);
+            Check("磁盘检查：需求过大时判定为不够", !bad.Ok);
+            Check("磁盘检查：不够时给出提示", bad.Message.Length > 0);
+            Contains("磁盘检查：提示里说明后果", bad.Message, "失败");
+
+            // 查不出来时**绝不能拦着用户下载**
+            var weird = DiskCheck.Check("Z:\\根本不存在的盘\\子目录", 1024);
+            Check("磁盘检查：路径不可用时放行（不阻塞下载）", weird.Ok);
+
+            Eq("磁盘大小人话：小数值", "512 字节", DiskCheck.Human(512));
+            Eq("磁盘大小人话：KB", "1.5 KB", DiskCheck.Human(1536));
+            Eq("磁盘大小人话：MB", "2 MB", DiskCheck.Human(2 * 1024 * 1024));
+            Eq("磁盘大小人话：GB", "1.5 GB", DiskCheck.Human((long)(1.5 * 1024 * 1024 * 1024)));
+        }
+
+        // ============================================================
+        //  16) 任务队列的持久化
+        // ============================================================
+
+        /// <summary>
+        /// 队列落盘/读回。
+        ///
+        /// 为什么要测：队列是"睡前排 5 本"的用法，误点关闭或程序崩一次，
+        /// 排好的队不该全白费。而这类"存了但要能读回来"的功能，
+        /// 最容易出的问题就是**存的时候格式和读的时候对不上**（目录缓存就栽过一次字段漏存）。
+        /// 所以这里必须做**往返**断言，不能只测"文件写出来了"。
+        /// </summary>
+        private static void TestQueuePersistence(string work)
+        {
+            var path = Path.Combine(work, "队列.json");
+
+            // 往返：普通书名
+            var items = new List<string> { "牧神记", "全职高手", "沧元图" };
+            Check("队列：保存成功", Bookshelf.SaveQueue(path, items));
+            var back = Bookshelf.LoadQueue(path);
+            Eq("队列：往返条数一致", 3, back.Count);
+            Eq("队列：第一项", "牧神记", back.Count > 0 ? back[0] : "");
+            Eq("队列：最后一项", "沧元图", back.Count > 2 ? back[2] : "");
+
+            // 往返：带引号、反斜杠、中文冒号的难搞内容
+            var tricky = new List<string>
+            {
+                "番茄：书名里有\"引号\"",
+                @"biquga：路径\带反斜杠",
+                "https://www.biquga.com/10_10333/",
+                "带 emoji 的书名 🐟",
+            };
+            Check("队列：难搞内容保存成功", Bookshelf.SaveQueue(path, tricky));
+            var back2 = Bookshelf.LoadQueue(path);
+            Eq("队列：难搞内容条数一致", 4, back2.Count);
+            for (int i = 0; i < tricky.Count && i < back2.Count; i++)
+                Eq("队列：难搞内容往返（第 " + (i + 1) + " 项）", tricky[i], back2[i]);
+
+            // 空列表 → 删文件而不是留个空文件
+            Check("队列：存空列表成功", Bookshelf.SaveQueue(path, new List<string>()));
+            Check("队列：空列表会删掉文件", !File.Exists(path));
+            Eq("队列：文件不存在时读回空列表", 0, Bookshelf.LoadQueue(path).Count);
+
+            // null 也不能抛
+            Check("队列：传 null 不抛异常", Bookshelf.SaveQueue(path, null));
+            Eq("队列：读不存在的文件 → 空列表", 0, Bookshelf.LoadQueue(Path.Combine(work, "没有这个.json")).Count);
+
+            // 损坏文件 → 空列表，不抛（配置类文件坏了不能让程序起不来）
+            File.WriteAllText(path, "{ 这不是合法 json [[[ ", new UTF8Encoding(false));
+            Eq("队列：损坏文件降级为空列表", 0, Bookshelf.LoadQueue(path).Count);
+
+            // 旧格式/多余字段也要能读（手改过的文件）
+            File.WriteAllText(path,
+                "{\n \"note\": \"手写的\",\n \"未知字段\": 123,\n \"items\": [\n  \"书一\",\n  \"书二\"\n ]\n}\n",
+                new UTF8Encoding(false));
+            var back3 = Bookshelf.LoadQueue(path);
+            Eq("队列：手改过的文件能读", 2, back3.Count);
+            Eq("队列：手改文件内容正确", "书一", back3.Count > 0 ? back3[0] : "");
+
+            // 空白项要被丢掉（用户按了空行不该变成一本书）
+            File.WriteAllText(path, "{\"items\":[\"书一\",\"\",\"  \",\"书二\"]}", new UTF8Encoding(false));
+            Eq("队列：空白项被丢弃", 2, Bookshelf.LoadQueue(path).Count);
+
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
         }
 
         // ============================================================
