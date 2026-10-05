@@ -365,9 +365,14 @@ namespace TomatoBiquga
             var b = (cfg.BaseUrl ?? "").TrimEnd('/');
             if (cfg.IsCloud)
             {
-                // 用户可能填 https://api.deepseek.com 也可能填 .../v1，两种都接受
-                if (b.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) return b + "/chat/completions";
+                // 已经给了完整路径 → 原样用
                 if (b.IndexOf("/chat/completions", StringComparison.OrdinalIgnoreCase) >= 0) return b;
+                // 已经带版本段（/v1、/v4…）→ 只补最后一段。
+                // ★ 智谱是 /api/paas/v4，**不是** /v1。第一版没考虑"带版本段但不是 v1"，
+                //   拼出了 .../v4/v1/chat/completions —— 用户点一下必然连不上。
+                //   是"每个预设都必须能拼出正确 URL"这条断言把它抓出来的。
+                if (System.Text.RegularExpressions.Regex.IsMatch(b, @"/v\d+$"))
+                    return b + "/chat/completions";
                 return b + "/v1/chat/completions";
             }
             if (b.EndsWith("/api/chat", StringComparison.OrdinalIgnoreCase)) return b;
@@ -535,6 +540,97 @@ namespace TomatoBiquga
             }
             sb.Append('"');
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// 云端预设：用户不懂"baseurl 填什么、模型叫什么"，所以给几个一键选项。
+        ///
+        /// 为什么只有这几家：它们都提供**标准 OpenAI 兼容接口**，
+        /// 所以同一套代码就能用，不必为每家写适配器。
+        /// 智谱排第一个是因为 GLM-4-Flash 有免费额度 ——
+        /// 想"用 AI 但不想花钱"的话这是正当路径（而不是去绕网页对话界面）。
+        ///
+        /// ⚠️ 各家的免费额度与模型名会变，请以官方控制台为准；
+        ///    这里只是把 baseurl 和常见模型名预填好，省得用户去翻文档。
+        /// </summary>
+        public class CloudPreset
+        {
+            public string Name = "";
+            public string BaseUrl = "";
+            public string Model = "";
+            /// <summary>给用户看的一句话说明（尤其标出"有免费额度"）</summary>
+            public string Note = "";
+            /// <summary>去哪拿 Key</summary>
+            public string ConsoleUrl = "";
+        }
+
+        public static List<CloudPreset> CloudPresets()
+        {
+            var list = new List<CloudPreset>();
+            list.Add(new CloudPreset
+            {
+                Name = "智谱 GLM",
+                BaseUrl = "https://open.bigmodel.cn/api/paas/v4",
+                Model = "glm-4-flash",
+                Note = "glm-4-flash 有免费额度，适合「想用 AI 又不想花钱」。额度以官方控制台为准。",
+                ConsoleUrl = "https://open.bigmodel.cn/",
+            });
+            list.Add(new CloudPreset
+            {
+                Name = "DeepSeek",
+                BaseUrl = "https://api.deepseek.com",
+                Model = "deepseek-chat",
+                Note = "中文强、便宜；裁决异体字这种细活我认为最合适。按量付费。",
+                ConsoleUrl = "https://platform.deepseek.com/",
+            });
+            list.Add(new CloudPreset
+            {
+                Name = "硅基流动 SiliconFlow",
+                BaseUrl = "https://api.siliconflow.cn",
+                Model = "Qwen/Qwen2.5-7B-Instruct",
+                Note = "聚合了很多开源模型，部分型号有免费档。",
+                ConsoleUrl = "https://cloud.siliconflow.cn/",
+            });
+            list.Add(new CloudPreset
+            {
+                Name = "自定义（其他 OpenAI 兼容服务）",
+                BaseUrl = "",
+                Model = "",
+                Note = "任何兼容 OpenAI /v1/chat/completions 的服务都能填：本机 vLLM、LM Studio、one-api 中转…",
+                ConsoleUrl = "",
+            });
+            return list;
+        }
+
+        /// <summary>
+        /// 列出本机 Ollama 已装的模型（GET /api/tags）。
+        ///
+        /// 为什么值得做：让用户手打模型名是最容易出错的一步
+        /// （`qwen2.5:7b` 少个冒号、`Qwen/Qwen2.5-7B-Instruct` 大小写写错，都会连不上）。
+        /// 探测出列表让他直接选，就避开了这类问题。
+        ///
+        /// 失败返回空列表 —— Ollama 没装/没启动是常态，不算错误。
+        /// </summary>
+        public static List<string> ListLocalModels(string baseUrl, int timeoutSeconds)
+        {
+            var list = new List<string>();
+            try
+            {
+                var b = (baseUrl ?? "").TrimEnd('/');
+                if (string.IsNullOrEmpty(b)) b = "http://127.0.0.1:11434";
+                var json = Http.GetWithTimeout(b + "/api/tags", Math.Max(3, timeoutSeconds));
+                if (string.IsNullOrEmpty(json)) return list;
+                foreach (System.Text.RegularExpressions.Match m in
+                    System.Text.RegularExpressions.Regex.Matches(json,
+                        "\"name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""))
+                {
+                    var n = m.Groups[1].Value.Trim();
+                    if (n.Length > 0 && !list.Contains(n)) list.Add(n);
+                }
+                list.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+            catch { /* Ollama 没启动是常态，不当错误 */ }
+            return list;
         }
 
         /// <summary>给 HTTP 层拼请求头（云端要 Authorization）</summary>

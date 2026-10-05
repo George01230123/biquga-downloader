@@ -146,6 +146,31 @@ namespace TomatoBiquga
         private const string ApiAccept = "application/vnd.github+json";
 
         /// <summary>
+        /// 带自定义超时的 GET（探测本地服务用，例如 Ollama 的 /api/tags）。
+        ///
+        /// 为什么单独一个：探测要**快**（3~5 秒就够），而全局 TimeoutSeconds 是给抓书页
+        /// 用的（25 秒）。拿 25 秒的超时去问"Ollama 在不在"会让界面白等。
+        /// 同样**不重试** —— 探测失败就是不在，重试只是浪费时间。
+        /// </summary>
+        public static string GetWithTimeout(string url, int timeoutSeconds)
+        {
+            int oldTimeout = TimeoutSeconds;
+            int oldRetries = MaxRetries;
+            try
+            {
+                TimeoutSeconds = Math.Max(1, timeoutSeconds);
+                MaxRetries = 1;
+                if (CurlAvailable) return FetchWithCurl(url, null, null);
+                return FetchWithDotNet(url, null, null);
+            }
+            finally
+            {
+                TimeoutSeconds = oldTimeout;
+                MaxRetries = oldRetries;
+            }
+        }
+
+        /// <summary>
         /// 发一个 JSON POST（AI 接口用）。
         ///
         /// 为什么单独开：普通 Post() 硬编码了

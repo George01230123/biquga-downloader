@@ -2312,6 +2312,268 @@ namespace TomatoBiquga
         //  AI 设置
         // ============================================================
 
+        // ============================================================
+        //  AI 裁决错字 —— 统一的选择对话框
+        // ============================================================
+
+        /// <summary>
+        /// 让用户选"本地还是云端"，并把参数配好。
+        ///
+        /// 出现的时机：**「检测错字」跑完双源比对之后、要送 AI 之前** ——
+        /// 那时差异清单已经算好，可以顺便告诉他"有 37 处高可疑、约 4000 token"，
+        /// 让他带着真实成本做选择。
+        ///
+        /// 交互取舍：
+        ///   · **默认选中「本地」** —— 不花钱、不联网，最没负担。
+        ///   · 本地下拉**列出你机器上真装了的模型**（探 /api/tags），
+        ///     不用手打 `qwen2.5:7b` 这种容易写错的名字。
+        ///   · 云端给预设（智谱有免费额度所以排第一），选完自动填好 baseurl 与模型名。
+        ///   · 没装 Ollama 时如实说明，并引导去云端或去装。
+        ///   · 记住上次的选择，第二次不再打扰。
+        ///
+        /// 返回 null = 用户选择不用 AI。
+        /// </summary>
+        private AiAdjudicator.Config AskAiChoice(int candidateCount, int approxTokens)
+        {
+            using (var dlg = new Form())
+            {
+                dlg.Text = "用 AI 裁决错字";
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.ClientSize = new Size(620, 470);
+
+                var head = new Label
+                {
+                    Dock = DockStyle.Top,
+                    Height = 68,
+                    Padding = new Padding(12, 12, 12, 0),
+                    Text = string.Format(
+                        "双源比对完成：有 {0} 处差异值得让 AI 判断哪个写法对。\n" +
+                        "预计发出约 {1:N0} 字符（≈{1:N0} token）—— 只发差异点前后十几个字，不发整章。\n" +
+                        "AI 也会判断错，重要的地方请自己复核。",
+                        candidateCount, approxTokens),
+                };
+
+                // ---- 本地 ----
+                var rdoLocal = new RadioButton { Text = "本地模型（不联网、不花钱）", AutoSize = true };
+                var cboLocal = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Width = 320 };
+                var lblLocalInfo = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(560, 0), Text = "正在探测本机模型…" };
+
+                var localBox = new GroupBox { Dock = DockStyle.Top, Height = 112, Padding = new Padding(12, 6, 12, 6) };
+                var localFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+                var localRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+                localRow.Controls.Add(cboLocal);
+                localFlow.Controls.AddRange(new Control[] { rdoLocal, localRow, lblLocalInfo });
+                localBox.Controls.Add(localFlow);
+
+                // ---- 云端 ----
+                var rdoCloud = new RadioButton { Text = "云端模型（快、效果好；差异片段会发给服务商）", AutoSize = true };
+                var cboPreset = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
+                var txtUrl = new TextBox { Width = 430 };
+                var txtModel = new TextBox { Width = 430 };
+                var txtKey = new TextBox { Width = 430 };
+                var lblPresetNote = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(560, 0) };
+
+                var cloudBox = new GroupBox { Dock = DockStyle.Top, Height = 190, Padding = new Padding(12, 6, 12, 6) };
+                var cloudFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+                var rowPreset = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+                rowPreset.Controls.Add(cboPreset);
+                var rowUrl = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+                rowUrl.Controls.AddRange(new Control[] { new Label { Text = "地址：", AutoSize = true }, txtUrl });
+                var rowModel = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+                rowModel.Controls.AddRange(new Control[] { new Label { Text = "模型：", AutoSize = true }, txtModel });
+                var rowKey = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+                rowKey.Controls.AddRange(new Control[] { new Label { Text = "密钥：", AutoSize = true }, txtKey });
+                cloudFlow.Controls.AddRange(new Control[] { rdoCloud, rowPreset, lblPresetNote, rowUrl, rowModel, rowKey });
+                cloudBox.Controls.Add(cloudFlow);
+
+                var presets = AiAdjudicator.CloudPresets();
+                foreach (var p in presets) cboPreset.Items.Add(p.Name);
+
+                var bar = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    Height = 46,
+                    FlowDirection = FlowDirection.LeftToRight,
+                    Padding = new Padding(12, 8, 12, 8),
+                    WrapContents = false,
+                };
+                var btnTest = new Button { Text = "测试连接", AutoSize = true };
+                var btnOk = new Button { Text = "开始 AI 裁决", AutoSize = true };
+                var btnSkip = new Button { Text = "不用 AI", AutoSize = true };
+                bar.Controls.AddRange(new Control[] { btnTest, btnOk, btnSkip });
+
+                AiAdjudicator.Config picked = null;
+
+                // 预置：记住上次的选择
+                bool cloud = _settings.AiEnabled && _settings.AiBackend == "openai";
+                if (!string.IsNullOrEmpty(_settings.AiModel)) txtModel.Text = _settings.AiModel;
+                if (cloud && !string.IsNullOrEmpty(_settings.AiBaseUrl)) txtUrl.Text = _settings.AiBaseUrl;
+                if (!string.IsNullOrEmpty(_settings.AiApiKey)) txtKey.Text = _settings.AiApiKey;
+                rdoCloud.Checked = cloud;
+                rdoLocal.Checked = !cloud;
+
+                // 本机模型探测放后台 —— 要发请求，不能让对话框卡住
+                var probeThread = new System.Threading.Thread(() =>
+                {
+                    var found = AiAdjudicator.ListLocalModels(_settings.AiBaseUrl, 5);
+                    try
+                    {
+                        dlg.BeginInvoke(new Action(() =>
+                        {
+                            cboLocal.Items.Clear();
+                            foreach (var m in found) cboLocal.Items.Add(m);
+                            if (found.Count > 0)
+                            {
+                                var prefer = _settings.AiModel;
+                                cboLocal.SelectedItem = found.Contains(prefer) ? prefer : found[0];
+                                lblLocalInfo.Text = "检测到本机 Ollama 已装 " + found.Count + " 个模型，直接选一个即可。";
+                            }
+                            else
+                            {
+                                cboLocal.Text = _settings.AiModel;
+                                lblLocalInfo.Text = "没检测到本机 Ollama（未安装或未启动）。" +
+                                    "装好之后执行 `ollama pull qwen2.5:7b`，再回来这里就能选到；也可以改用云端。";
+                            }
+                        }));
+                    }
+                    catch { }
+                });
+                probeThread.IsBackground = true;
+                probeThread.Start();
+
+                Action syncCloudFields = () =>
+                {
+                    var idx = cboPreset.SelectedIndex;
+                    if (idx < 0 || idx >= presets.Count) return;
+                    var p = presets[idx];
+                    lblPresetNote.Text = p.Note;
+                    if (p.BaseUrl.Length > 0) txtUrl.Text = p.BaseUrl;
+                    if (p.Model.Length > 0) txtModel.Text = p.Model;
+                };
+
+                if (cboPreset.Items.Count > 0)
+                {
+                    int pick = 0;
+                    for (int i = 0; i < presets.Count; i++)
+                    {
+                        var bu = presets[i].BaseUrl;
+                        if (bu.Length > 0 && !string.IsNullOrEmpty(_settings.AiBaseUrl) &&
+                            _settings.AiBaseUrl.IndexOf(bu, StringComparison.OrdinalIgnoreCase) >= 0)
+                        { pick = i; break; }
+                    }
+                    cboPreset.SelectedIndex = pick;
+                    syncCloudFields();
+                }
+                cboPreset.SelectedIndexChanged += (s, e) => syncCloudFields();
+
+                Action syncEnabled = () =>
+                {
+                    bool c = rdoCloud.Checked;
+                    cboLocal.Enabled = !c;
+                    foreach (Control x in new Control[] { cboPreset, txtUrl, txtModel, txtKey }) x.Enabled = c;
+                };
+                rdoCloud.CheckedChanged += (s, e) => syncEnabled();
+                rdoLocal.CheckedChanged += (s, e) => syncEnabled();
+                syncEnabled();
+
+                Func<AiAdjudicator.Config> read = () =>
+                {
+                    if (rdoLocal.Checked)
+                        return new AiAdjudicator.Config
+                        {
+                            Backend = "ollama",
+                            BaseUrl = string.IsNullOrEmpty(_settings.AiBaseUrl)
+                                ? "http://127.0.0.1:11434" : _settings.AiBaseUrl,
+                            Model = cboLocal.Text.Trim(),
+                            BatchSize = _settings.AiBatchSize,
+                        };
+                    return new AiAdjudicator.Config
+                    {
+                        Backend = "openai",
+                        BaseUrl = txtUrl.Text.Trim(),
+                        Model = txtModel.Text.Trim(),
+                        ApiKey = txtKey.Text.Trim(),
+                        BatchSize = _settings.AiBatchSize,
+                    };
+                };
+
+                btnTest.Click += (s, e) =>
+                {
+                    var cfg = read();
+                    var bad = cfg.Validate();
+                    if (bad != null)
+                    {
+                        MessageBox.Show(dlg, "配置不完整：\n\n" + bad, "AI 连接测试",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    btnTest.Enabled = false;
+                    btnTest.Text = "测试中…";
+                    dlg.Refresh();
+                    Application.DoEvents();   // 先重绘，否则看起来像卡死
+                    var res = AiAdjudicator.TestConnection(cfg);
+                    btnTest.Text = "测试连接";
+                    btnTest.Enabled = true;
+                    MessageBox.Show(dlg, res, "AI 连接测试", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                };
+
+                btnOk.Click += (s, e) =>
+                {
+                    var cfg = read();
+                    var bad = cfg.Validate();
+                    if (bad != null)
+                    {
+                        MessageBox.Show(dlg, "还不能开始：\n\n" + bad, "AI 裁决",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (cfg.IsCloud)
+                    {
+                        var ok = MessageBox.Show(dlg,
+                            "即将把**差异点前后的正文片段**发送到：\n" + cfg.BaseUrl +
+                            "\n\n模型：" + cfg.Model +
+                            "\n密钥会以**明文**保存到 settings.ini。\n\n确认继续吗？",
+                            "内容会发送到第三方", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                        if (ok != DialogResult.Yes) return;
+                    }
+                    picked = cfg;
+                    dlg.DialogResult = DialogResult.OK;
+                    dlg.Close();
+                };
+
+                btnSkip.Click += (s, e) => { dlg.DialogResult = DialogResult.Cancel; dlg.Close(); };
+
+                dlg.Controls.Add(cloudBox);
+                dlg.Controls.Add(localBox);
+                dlg.Controls.Add(head);
+                dlg.Controls.Add(bar);
+                dlg.CancelButton = btnSkip;
+
+                var ret = dlg.ShowDialog(this);
+                if (ret != DialogResult.OK || picked == null) return null;
+
+                // 记住这次选择（下次不再问）
+                _settings.AiEnabled = true;
+                _settings.AiBackend = picked.Backend;
+                _settings.AiModel = picked.Model;
+                if (picked.IsCloud)
+                {
+                    _settings.AiBaseUrl = picked.BaseUrl;
+                    _settings.AiApiKey = picked.ApiKey;
+                }
+                else if (string.IsNullOrEmpty(_settings.AiBaseUrl))
+                {
+                    _settings.AiBaseUrl = "http://127.0.0.1:11434";
+                }
+                try { _settings.Save(); } catch { }
+                Log("AI 裁决本次使用：" + picked.Describe());
+                return picked;
+            }
+        }
+
         /// <summary>「AI 设置」按钮：配置后端、模型、Key，并能当场测连接</summary>
         private void DoAiSettings()
         {
@@ -2620,10 +2882,12 @@ namespace TomatoBiquga
                     UiInvoke(() => lblStatus.Text = string.Format("错字检测 {0}/{1} 章…", n, limit));
                 }
 
-                // ---- AI 裁决（可选，默认关）----
-                // 只把"两个源写法不同、不知道哪个对"的高可疑差异交给大模型，
-                // 而且只发差异点前后十几个字 —— 成本与隐私都压到最小。
-                var aiStats = RunAiIfEnabled(result, Log);
+                // ---- AI 裁决（可选）----
+                // 时机刻意放在这里：双源比对刚跑完，差异清单已经算好，
+                // 所以能在问用户"本地还是云端"的同时**给出真实成本**
+                // （多少处高可疑、约多少 token）—— 让他带着数字做选择，
+                // 而不是配置完一堆参数才发现要发多少东西。
+                var aiStats = RunAiAdjudication(result, Log);
 
                 // 写报告
                 string repPath = null, csvPath = null;
@@ -2665,61 +2929,50 @@ namespace TomatoBiquga
         }
 
         /// <summary>
-        /// 如果用户开了 AI，就对这次比对结果跑一轮裁决。
-        /// 返回 null = 没跑（没开 / 配置不全 / 用户拒绝）。
+        /// 「检测错字」跑完双源比对之后，问用户要不要用 AI 裁决，跑一轮，返回统计。
+        /// 返回 null = 没跑（没有高可疑差异 / 用户选了「不用 AI」/ 配置不全）。
         ///
         /// 三条克制（都是刻意的）：
-        ///   · **默认关**：不开就完全不联网、不花钱。
-        ///   · **先估成本再问**：告诉用户要发多少处、大约多少 token，由他确认。
+        ///   · **默认不跑**：不问就不联网、不花钱。没配过 AI 的人第一次会看到选择框。
+        ///   · **带着真实成本问**：先算好有多少处、约多少 token，再让用户选后端。
         ///   · **失败不抛**：AiAdjudicator.Run 承诺不抛异常，AI 挂了报告照出。
         /// </summary>
-        internal AiAdjudicator.SessionStats RunAiIfEnabled(TypoFinder.Result result, Action<string> log)
+        internal AiAdjudicator.SessionStats RunAiAdjudication(TypoFinder.Result result, Action<string> log)
         {
-            if (result == null || !_settings.AiEnabled) return null;
+            if (result == null) return null;
 
-            var cfg = new AiAdjudicator.Config
-            {
-                Backend = _settings.AiBackend,
-                BaseUrl = _settings.AiBaseUrl,
-                Model = _settings.AiModel,
-                ApiKey = _settings.AiApiKey,
-                BatchSize = _settings.AiBatchSize,
-            };
-
-            var bad = cfg.Validate();
-            if (bad != null)
-            {
-                if (log != null) log("AI 已开启但配置不完整，跳过 AI 裁决：" + bad);
-                return null;
-            }
-
-            // 只挑"高可疑"的，先给用户看成本
+            // 只挑"高可疑"的 —— 站点排版差异占了报告里的大头，但它们不是错字，
+            // 送了既费钱又会干扰模型判断。
             var cand = AiAdjudicator.PickCandidates(result.Diffs);
             if (cand.Count == 0)
             {
-                if (log != null) log("AI：没有需要裁决的高可疑差异（其余属于站点排版差异，不值得送 AI）。");
+                if (log != null)
+                    log("AI：没有需要裁决的高可疑差异（其余属于站点排版差异，不值得送 AI）。");
                 return null;
             }
             int chars, tokens;
             AiAdjudicator.Estimate(result.Diffs, cand, out chars, out tokens);
 
-            if (!SuppressDialogs)
+            // 选后端：本地 / 云端（含预设与自填），并把成本一并告诉他
+            AiAdjudicator.Config cfg;
+            if (SuppressDialogs)
             {
-                var who = cfg.IsCloud
-                    ? "【云端】" + cfg.Model + "\n差异片段会被发送到 " + cfg.BaseUrl
-                    : "【本地】" + cfg.Model + "（不联网到外部）";
-                var r = MessageBox.Show(this,
-                    string.Format(
-                        "要用 AI 裁决这 {0} 处高可疑差异吗？\n\n" +
-                        "后端：{1}\n\n" +
-                        "只发**差异点前后十几个字**，不发整章、不发整本。\n" +
-                        "预计发出约 {2:N0} 字符（≈{3:N0} token）。\n\n" +
-                        "（AI 也会判断错，重要的地方请自己复核）",
-                        cand.Count, who, chars, tokens),
-                    "AI 裁决错字", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (r != DialogResult.Yes)
+                // 自测/自动化下不弹窗：用已保存的配置；没配过就直接跳过
+                if (!_settings.AiEnabled) return null;
+                cfg = new AiAdjudicator.Config
                 {
-                    if (log != null) log("用户跳过了 AI 裁决。");
+                    Backend = _settings.AiBackend, BaseUrl = _settings.AiBaseUrl,
+                    Model = _settings.AiModel, ApiKey = _settings.AiApiKey,
+                    BatchSize = _settings.AiBatchSize,
+                };
+                if (cfg.Validate() != null) return null;
+            }
+            else
+            {
+                cfg = AskAiChoice(cand.Count, tokens);
+                if (cfg == null)
+                {
+                    if (log != null) log("用户选择了不用 AI，只出「双源比对」报告。");
                     return null;
                 }
             }
@@ -2728,9 +2981,8 @@ namespace TomatoBiquga
             var stats = new AiAdjudicator.SessionStats();
             AiAdjudicator.Run(result.Diffs, verdicts, cfg, log, () => _cancel, stats);
 
-            // 注意：裁决已经由 run 写回 result.Diffs[i].Ai（报告/CSV 直接读那里），
-            // 这里不需要再抄一遍 —— 之前正是因为"抄写"留给了调用方，探针漏抄才出的 bug。
-
+            // 注意：裁决已由 Run 写回 result.Diffs[i].Ai（报告/CSV 直接读那里），
+            // 这里不要再抄一遍 —— 之前正因为"抄写"留给调用方，探针漏抄才出的 bug。
             return stats;
         }
 

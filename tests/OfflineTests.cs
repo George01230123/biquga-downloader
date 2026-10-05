@@ -3035,6 +3035,62 @@ namespace TomatoBiquga
                 AiAdjudicator.ExtractContent(errJson, local));
             Eq("AI 响应：空输入安全", null, AiAdjudicator.ExtractContent("", local));
             Eq("AI 响应：null 安全", null, AiAdjudicator.ExtractContent(null, local));
+
+            // ---------- 云端预设 ----------
+            var presets = AiAdjudicator.CloudPresets();
+            Check("AI 预设：至少 3 个（" + presets.Count + "）", presets.Count >= 3);
+            // 智谱排第一：它是"想用 AI 又不想花钱"的正当路径
+            Eq("AI 预设：第一个是智谱（有免费额度）", "智谱", presets[0].Name.Substring(0, 2));
+            Contains("AI 预设：智谱说明里点出免费", presets[0].Note, "免费");
+            Check("AI 预设：每个预设都有说明", AllHave(presets, true));
+            Check("AI 预设：有 DeepSeek", HasPreset(presets, "DeepSeek"));
+            Check("AI 预设：有硅基流动", HasPreset(presets, "硅基"));
+            // 最后一个必须是"自定义"，否则用户没法接别家
+            Check("AI 预设：最后一个是自定义",
+                presets[presets.Count - 1].Name.StartsWith("自定义", StringComparison.Ordinal));
+            // 除自定义外都要填好 baseurl 与模型名 —— 预设的意义就是"不用用户去翻文档"
+            foreach (var p in presets)
+            {
+                if (p.Name.StartsWith("自定义", StringComparison.Ordinal)) continue;
+                Check("AI 预设：[" + p.Name + "] 填了地址", p.BaseUrl.StartsWith("http", StringComparison.Ordinal));
+                Check("AI 预设：[" + p.Name + "] 填了模型名", p.Model.Length > 0);
+                Check("AI 预设：[" + p.Name + "] 给了控制台地址", p.ConsoleUrl.StartsWith("http", StringComparison.Ordinal));
+                // 预设地址必须是 https（密钥不能被明文传输）
+                Check("AI 预设：[" + p.Name + "] 用 https",
+                    p.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+            }
+
+            // 预设的地址要能和我们自己的 URL 拼装对上（否则用户点一下就连不上）
+            foreach (var p in presets)
+            {
+                if (p.BaseUrl.Length == 0) continue;
+                var c = new AiAdjudicator.Config { Backend = "openai", BaseUrl = p.BaseUrl, Model = p.Model, ApiKey = "k" };
+                var u = AiAdjudicator.BuildUrl(c);
+                Check("AI 预设：[" + p.Name + "] 地址能拼成正确的请求 URL（" + u + "）",
+                    u.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) &&
+                    u.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+                // 智谱的 v4 路径不能被我们再拼一个 /v1 上去
+                if (p.Name.StartsWith("智谱", StringComparison.Ordinal))
+                    Check("AI 预设：智谱地址不重复拼 v1（" + u + "）", u.IndexOf("/v1/", StringComparison.Ordinal) < 0);
+            }
+
+            // ---------- 本机模型探测：连不上时必须安全返回空 ----------
+            var none = AiAdjudicator.ListLocalModels("http://127.0.0.1:1", 2);
+            Eq("AI 本机探测：连不上返回空列表（Ollama 没装是常态）", 0, none.Count);
+            Eq("AI 本机探测：空地址也返回空列表不抛", 0, AiAdjudicator.ListLocalModels("", 2).Count);
+            Eq("AI 本机探测：null 地址也安全", 0, AiAdjudicator.ListLocalModels(null, 2).Count);
+        }
+
+        private static bool AllHave(List<AiAdjudicator.CloudPreset> list, bool _)
+        {
+            foreach (var p in list) if (string.IsNullOrEmpty(p.Note)) return false;
+            return true;
+        }
+
+        private static bool HasPreset(List<AiAdjudicator.CloudPreset> list, string kw)
+        {
+            foreach (var p in list) if (p.Name.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         // ============================================================
