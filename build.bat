@@ -33,7 +33,7 @@ set FLAGS=/nologo /platform:anycpu /optimize+ /codepage:65001 /nowarn:1591,0618
 rem System.IO.Compression[.FileSystem]: needed by the EPUB export (hand-written zip,
 rem zero third-party dependencies).
 set REFS=/r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll
-set COMMON=src\Common\Models.cs src\Common\Log.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs src\Common\ChapterIndex.cs src\Common\SiteProfile.cs src\Common\MarkdownWriter.cs src\Common\CoverFetcher.cs src\Common\BookStats.cs src\Common\Bookshelf.cs src\Common\UpdateChecker.cs src\Common\ZhConvert.cs src\Common\NetDiag.cs src\Common\TypoFinder.cs src\Common\CrawlResume.cs
+set COMMON=src\Common\Models.cs src\Common\Log.cs src\Common\Http.cs src\Common\AppSettings.cs src\Common\DirCache.cs src\Common\FontMap.cs src\Common\DownloadRunner.cs src\Common\EpubWriter.cs src\Common\ChapterIndex.cs src\Common\SiteProfile.cs src\Common\MarkdownWriter.cs src\Common\CoverFetcher.cs src\Common\BookStats.cs src\Common\Bookshelf.cs src\Common\UpdateChecker.cs src\Common\ZhConvert.cs src\Common\NetDiag.cs src\Common\TypoFinder.cs src\Common\CrawlResume.cs src\Common\AiAdjudicator.cs
 set SITES=src\Sites\BiqugaSite.cs src\Sites\BiqugaMobileSite.cs src\Sites\FanqieSite.cs src\Sites\TomatoCore.cs
 
 echo [2/6] Building main program (GUI)...
@@ -66,6 +66,16 @@ rem hardcoded Width plus AutoEllipsis, so on a font/DPI where the label measured
 rem than the design value, every button lost its text.
 "%CSC%" %FLAGS% /target:exe /main:TextFitProbe /out:"dist\_textfit.exe" %REFS% ^
  src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\TextFitProbe.cs %COMMON% %SITES%
+if errorlevel 1 goto failed
+
+rem AI probe: starts a FAKE OpenAI/Ollama server on a loopback port and drives the real
+rem AiAdjudicator against it -- no model, no internet needed. Modes: openai / ollama / err.
+rem Why it exists: the pure-function tests covered "build the JSON" and "parse the reply"
+rem but NOT "does the verdict land back on the Diff". It did not -- verdicts[] got filled
+rem while diffs[].Ai stayed null, so the report showed nothing at all. Only a real
+rem end-to-end pass over HTTP caught that.
+"%CSC%" %FLAGS% /target:exe /main:AiMockProbe /out:"dist\_aimock.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tools\AiMockProbe.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
 echo [4/6] Building offline unit tests (no network needed, used by CI)...

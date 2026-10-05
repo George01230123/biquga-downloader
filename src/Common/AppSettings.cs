@@ -38,6 +38,34 @@ namespace TomatoBiquga
         /// </summary>
         public bool OutputTraditional = false;
 
+        // ---- AI 裁决错字（默认全关：不填就用不了，也绝不会偷偷联网）----
+
+        /// <summary>
+        /// 是否启用 AI 裁决。**默认 false**。
+        /// 为什么不默认开：开了意味着正文片段会被发到外部服务，
+        /// 而"不把内容交给第三方"是这个工具一直守着的姿态 —— 必须用户显式同意。
+        /// </summary>
+        public bool AiEnabled = false;
+
+        /// <summary>后端：ollama（本地，不联网）/ openai（云端，兼容 OpenAI 格式）</summary>
+        public string AiBackend = "ollama";
+
+        /// <summary>服务地址。Ollama 默认 127.0.0.1:11434</summary>
+        public string AiBaseUrl = "http://127.0.0.1:11434";
+
+        /// <summary>模型名，例如 qwen2.5:7b 或 deepseek-chat</summary>
+        public string AiModel = "";
+
+        /// <summary>
+        /// 云端 API Key（本地 Ollama 留空）。
+        /// 说明：**以明文存在 settings.ini 里**，设置界面会明确提示这一点 ——
+        /// 这个项目零依赖、没有安全存储可用，与其假装安全不如说清楚。
+        /// </summary>
+        public string AiApiKey = "";
+
+        /// <summary>一次请求塞几条差异（越大越省请求数，但单次响应也越容易跑格式）</summary>
+        public int AiBatchSize = 10;
+
         public static string DefaultPath
         {
             get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, FileName); }
@@ -72,14 +100,24 @@ namespace TomatoBiquga
                         var v = t.Substring(eq + 1).Trim();
 
                         // 布尔键先判：它们的值是 true/false，走 int.TryParse 会全部被丢掉
-                        if (k == "outputtraditional")
+                        if (k == "outputtraditional" || k == "aienabled")
                         {
                             bool b;
-                            if (bool.TryParse(v, out b)) s.OutputTraditional = b;
-                            else if (v == "1") s.OutputTraditional = true;
-                            else if (v == "0") s.OutputTraditional = false;
+                            bool val;
+                            if (bool.TryParse(v, out b)) val = b;
+                            else if (v == "1") val = true;
+                            else if (v == "0") val = false;
+                            else continue;
+                            if (k == "outputtraditional") s.OutputTraditional = val;
+                            else s.AiEnabled = val;
                             continue;
                         }
+
+                        // 字符串键（AI 配置都是字符串，不能让它们走 int 解析被丢掉）
+                        if (k == "aibackend") { s.AiBackend = v; continue; }
+                        if (k == "aibaseurl") { s.AiBaseUrl = v; continue; }
+                        if (k == "aimodel") { s.AiModel = v; continue; }
+                        if (k == "aiapikey") { s.AiApiKey = v; continue; }
 
                         int n;
                         if (!int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) continue;
@@ -102,6 +140,11 @@ namespace TomatoBiquga
             MaxDelayMs = ClampInt(MaxDelayMs, MinDelayMs, 5000);
             CrawlTimeoutMinutes = ClampInt(CrawlTimeoutMinutes, 1, 600);
             RetryPasses = ClampInt(RetryPasses, 0, 3);
+            AiBatchSize = ClampInt(AiBatchSize, 1, 50);
+            if (string.IsNullOrEmpty(AiBackend)) AiBackend = "ollama";
+            if (string.IsNullOrEmpty(AiBaseUrl)) AiBaseUrl = "http://127.0.0.1:11434";
+            if (AiModel == null) AiModel = "";
+            if (AiApiKey == null) AiApiKey = "";
         }
 
         private static int ClampInt(int v, int lo, int hi)
@@ -122,6 +165,11 @@ namespace TomatoBiquga
                 case "maxdelayms": MaxDelayMs = value; break;
                 case "crawltimeoutminutes": CrawlTimeoutMinutes = value; break;
                 case "retrypasses": RetryPasses = value; break;
+                // ★ 每个"数值键"都必须在这里有分支，否则 Load 里解析出来也会被丢掉、
+                //   悄悄退回默认值。这个错真犯过：AiBatchSize 在 Load 里解析了、
+                //   Set 里忘了接，于是配 7 也永远生效成 10 —— 而且不报任何错，
+                //   只能靠"设置往返"断言发现。
+                case "aibatchsize": AiBatchSize = value; break;
                 // 未知键忽略：老版本写的键，新版本不该因此报错
             }
         }
@@ -146,6 +194,26 @@ namespace TomatoBiquga
             sb.AppendLine("RetryPasses=" + RetryPasses);
             sb.AppendLine("# OutputTraditional=true 时，写盘/导出会把正文转成繁体（本地转换，不联网）");
             sb.AppendLine("OutputTraditional=" + (OutputTraditional ? "true" : "false"));
+            sb.AppendLine();
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# AI 裁决错字（默认全关）");
+            sb.AppendLine("#");
+            sb.AppendLine("# 作用：把「检测错字」里**两个源写法不同、不知道哪个对**的那几处差异");
+            sb.AppendLine("#       交给大模型判断。注意只发差异点前后十几个字，不发整章、不发整本。");
+            sb.AppendLine("#");
+            sb.AppendLine("# AiBackend=ollama  本地模型，不联网、不花钱（推荐，需要先装 Ollama）");
+            sb.AppendLine("# AiBackend=openai  云端接口，兼容 OpenAI 格式的那一类");
+            sb.AppendLine("#                   （DeepSeek / Kimi / 通义 / 硅基流动 / OpenAI 本身…）");
+            sb.AppendLine("#");
+            sb.AppendLine("# ⚠ 选 openai 时，差异片段会被发送到该服务商；");
+            sb.AppendLine("#   AiApiKey 以**明文**保存在这个文件里，请不要把本文件分享给别人。");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("AiEnabled=" + (AiEnabled ? "true" : "false"));
+            sb.AppendLine("AiBackend=" + AiBackend);
+            sb.AppendLine("AiBaseUrl=" + AiBaseUrl);
+            sb.AppendLine("AiModel=" + AiModel);
+            sb.AppendLine("AiApiKey=" + AiApiKey);
+            sb.AppendLine("AiBatchSize=" + AiBatchSize);
             try
             {
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));

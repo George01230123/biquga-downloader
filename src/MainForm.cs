@@ -51,6 +51,7 @@ namespace TomatoBiquga
         private Button btnQueue;            // 任务队列（一次下多本）
         private Button btnCheckUpdate;      // 检查更新
         private Button btnProbeSites;       // 检测站点可用性
+        private Button btnAiSettings;       // AI 裁决错字的设置
         private Button btnDetectTypos;      // 错字检测（双源比对）
         private CheckBox chkTraditional;    // 输出繁体（繁简转换）
 
@@ -206,7 +207,13 @@ namespace TomatoBiquga
                 "一次排多本书依次下载（每行一个书名或站点链接）。\n" +
                 "适合睡前挂机：走的是和单个下载完全相同的流程，失败了也不影响后面的书。");
             btnCheckUpdate = MakeButton("检查更新", 60, (s, e) => DoCheckUpdate(), 8);
-            btnProbeSites = MakeButton("检测站点", 60, (s, e) => DoProbeSites(), 0);
+            btnProbeSites = MakeButton("检测站点", 60, (s, e) => DoProbeSites(), 2);
+            btnAiSettings = MakeButton("AI 设置", 60, (s, e) => DoAiSettings(), 0);
+            new ToolTip().SetToolTip(btnAiSettings,
+                "配置 AI 裁决错字（默认关闭）。\n" +
+                "开了之后，「检测错字」会把**两个源写法不同**的那几处差异交给大模型判断\n" +
+                "哪个写法对 —— 只发差异点前后十几个字，不发整章。\n\n" +
+                "本地后端（Ollama）不联网、不花钱；云端后端会把片段发给服务商。");
 
             // 繁简转换：转换在**写盘时**做，所以 TXT / EPUB / Markdown 都会跟着变。
             chkTraditional = new CheckBox
@@ -225,7 +232,7 @@ namespace TomatoBiquga
                 Log(chkTraditional.Checked ? "输出繁体：已开启（导出时转换）" : "输出繁体：已关闭");
             };
 
-            row4.Controls.AddRange(new Control[] { btnShelf, btnQueue, btnCheckUpdate, btnProbeSites, chkTraditional });
+            row4.Controls.AddRange(new Control[] { btnShelf, btnQueue, btnCheckUpdate, btnProbeSites, btnAiSettings, chkTraditional });
 
             // 第 3 行：番茄专用（平时整行隐藏，切到「番茄小说」才出现）
             //   —— 这几个按钮在老代码里被硬编码在 x=700/876，正是被切掉/盖住文字的那批
@@ -2301,6 +2308,188 @@ namespace TomatoBiquga
             ProbeSitesAsync();
         }
 
+        // ============================================================
+        //  AI 设置
+        // ============================================================
+
+        /// <summary>「AI 设置」按钮：配置后端、模型、Key，并能当场测连接</summary>
+        private void DoAiSettings()
+        {
+            if (_busy) { BusyNotice("AI 设置"); return; }
+
+            using (var dlg = new Form())
+            {
+                dlg.Text = "AI 裁决错字 —— 设置";
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.MinimizeBox = false;
+                dlg.MaximizeBox = false;
+                dlg.ClientSize = new Size(560, 400);
+
+                var tip = new Label
+                {
+                    Dock = DockStyle.Top,
+                    Height = 96,
+                    Padding = new Padding(12, 12, 12, 0),
+                    Text =
+                        "AI 只做一件事：把「检测错字」里两个源写法不同、不知道哪个对的那几处\n" +
+                        "交给大模型判断。**只发差异点前后十几个字**，不发整章、不发整本。\n\n" +
+                        "· 本地后端（Ollama）：不联网、不花钱。需要先装 Ollama 并下载模型。\n" +
+                        "· 云端后端：差异片段会发送到该服务商；API Key 以明文存在 settings.ini。\n\n" +
+                        "默认关闭；不开就完全不会联网、不会产生任何费用。",
+                };
+
+                var grid = new TableLayoutPanel
+                {
+                    Dock = DockStyle.Top,
+                    Height = 150,
+                    ColumnCount = 2,
+                    Padding = new Padding(12, 6, 12, 0),
+                };
+                grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+                grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+                var chkEnabled = new CheckBox { Text = "启用 AI 裁决", AutoSize = true, Checked = _settings.AiEnabled };
+                var cboBackend = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
+                cboBackend.Items.AddRange(new object[] { "ollama", "openai" });
+                cboBackend.SelectedItem = _settings.AiBackend == "openai" ? "openai" : "ollama";
+                var txtUrl = new TextBox { Text = _settings.AiBaseUrl, Width = 420 };
+                var txtModel = new TextBox { Text = _settings.AiModel, Width = 420 };
+                var txtKey = new TextBox { Text = _settings.AiApiKey, Width = 420, UseSystemPasswordChar = false };
+                var numBatch = new NumericUpDown { Minimum = 1, Maximum = 50, Value = Math.Max(1, Math.Min(50, _settings.AiBatchSize)), Width = 60 };
+
+                grid.Controls.Add(new Label { Text = "总开关：", AutoSize = true }, 0, 0);
+                grid.Controls.Add(chkEnabled, 1, 0);
+                grid.Controls.Add(new Label { Text = "后端：", AutoSize = true }, 0, 1);
+                grid.Controls.Add(cboBackend, 1, 1);
+                grid.Controls.Add(new Label { Text = "服务地址：", AutoSize = true }, 0, 2);
+                grid.Controls.Add(txtUrl, 1, 2);
+                grid.Controls.Add(new Label { Text = "模型名：", AutoSize = true }, 0, 3);
+                grid.Controls.Add(txtModel, 1, 3);
+                grid.Controls.Add(new Label { Text = "API Key：", AutoSize = true }, 0, 4);
+                grid.Controls.Add(txtKey, 1, 4);
+                grid.Controls.Add(new Label { Text = "每批条数：", AutoSize = true }, 0, 5);
+                grid.Controls.Add(numBatch, 1, 5);
+
+                var hint = new Label
+                {
+                    Dock = DockStyle.Top,
+                    Height = 34,
+                    Padding = new Padding(12, 4, 12, 0),
+                    ForeColor = Color.DimGray,
+                    Text = "本地示例：ollama / http://127.0.0.1:11434 / qwen2.5:7b（Key 留空）\n" +
+                           "云端示例：openai / https://api.deepseek.com / deepseek-chat（填 Key）",
+                };
+
+                var bar = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    Height = 46,
+                    FlowDirection = FlowDirection.LeftToRight,
+                    Padding = new Padding(12, 8, 12, 8),
+                    WrapContents = false,
+                };
+                var btnTest = new Button { Text = "测试连接", AutoSize = true };
+                var btnSave = new Button { Text = "保存", AutoSize = true };
+                var btnCancel = new Button { Text = "取消", AutoSize = true };
+                bar.Controls.AddRange(new Control[] { btnTest, btnSave, btnCancel });
+
+                // 切后端时自动填一份合理的默认地址，省得用户去查
+                cboBackend.SelectedIndexChanged += (s, e) =>
+                {
+                    bool cloud = (string)cboBackend.SelectedItem == "openai";
+                    if (cloud && txtUrl.Text.Trim() == "http://127.0.0.1:11434")
+                        txtUrl.Text = "https://api.deepseek.com";
+                    if (!cloud && txtUrl.Text.Trim().StartsWith("https://api.", StringComparison.OrdinalIgnoreCase))
+                        txtUrl.Text = "http://127.0.0.1:11434";
+                };
+
+                btnTest.Click += (s, e) =>
+                {
+                    var cfg = ReadAiConfig(chkEnabled, cboBackend, txtUrl, txtModel, txtKey, numBatch);
+                    btnTest.Enabled = false;
+                    btnTest.Text = "测试中…";
+                    dlg.Refresh();
+                    // 本地小模型可能要几十秒，必须丢到后台，否则窗口假死
+                    var res = AiAdjudicator.TestConnection(cfg);
+                    btnTest.Text = "测试连接";
+                    btnTest.Enabled = true;
+                    MessageBox.Show(dlg, res, "AI 连接测试", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                };
+
+                btnSave.Click += (s, e) =>
+                {
+                    var cfg = ReadAiConfig(chkEnabled, cboBackend, txtUrl, txtModel, txtKey, numBatch);
+                    if (chkEnabled.Checked)
+                    {
+                        var bad = cfg.Validate();
+                        if (bad != null)
+                        {
+                            MessageBox.Show(dlg, "配置不完整：\n\n" + bad, "AI 设置",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
+                        // 云端要再确认一次：这是"内容外发"的同意步骤
+                        if (cfg.IsCloud)
+                        {
+                            var ok = MessageBox.Show(dlg,
+                                "你选择了云端后端。\n\n" +
+                                "「检测错字」跑 AI 时，**差异点前后的正文片段会被发送到**：\n" +
+                                cfg.BaseUrl + "\n\n" +
+                                "API Key 会以**明文**保存到 settings.ini。\n\n" +
+                                "确认继续吗？",
+                                "内容会发送到第三方", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                            if (ok != DialogResult.Yes) return;
+                        }
+                    }
+                    _settings.AiEnabled = cfg != null && chkEnabled.Checked;
+                    _settings.AiBackend = (string)cboBackend.SelectedItem;
+                    _settings.AiBaseUrl = txtUrl.Text.Trim();
+                    _settings.AiModel = txtModel.Text.Trim();
+                    _settings.AiApiKey = txtKey.Text.Trim();
+                    _settings.AiBatchSize = (int)numBatch.Value;
+                    try
+                    {
+                        _settings.Save();
+                        Log("AI 设置已保存：" + (_settings.AiEnabled
+                            ? new AiAdjudicator.Config
+                              {
+                                  Backend = _settings.AiBackend, BaseUrl = _settings.AiBaseUrl,
+                                  Model = _settings.AiModel, ApiKey = _settings.AiApiKey,
+                              }.Describe()
+                            : "已关闭（不会联网）"));
+                    }
+                    catch (Exception ex) { Log("保存 AI 设置失败：" + ex.Message); }
+                    dlg.DialogResult = DialogResult.OK;
+                    dlg.Close();
+                };
+
+                btnCancel.Click += (s, e) => { dlg.DialogResult = DialogResult.Cancel; dlg.Close(); };
+
+                dlg.Controls.Add(hint);
+                dlg.Controls.Add(grid);
+                dlg.Controls.Add(tip);
+                dlg.Controls.Add(bar);
+                dlg.CancelButton = btnCancel;
+
+                dlg.ShowDialog(this);
+            }
+        }
+
+        /// <summary>从 AI 设置对话框的控件里读配置（测试连接与保存共用，避免两处读法不一致）</summary>
+        private static AiAdjudicator.Config ReadAiConfig(CheckBox enabled, ComboBox backend,
+            TextBox url, TextBox model, TextBox key, NumericUpDown batch)
+        {
+            return new AiAdjudicator.Config
+            {
+                Backend = backend.SelectedItem == null ? "ollama" : (string)backend.SelectedItem,
+                BaseUrl = url.Text.Trim(),
+                Model = model.Text.Trim(),
+                ApiKey = key.Text.Trim(),
+                BatchSize = (int)batch.Value,
+            };
+        }
+
         /// <summary>
         /// 载入目录/下载前的前置检查：当前站点不可用就提示降级。
         /// 返回 true = 可以继续；false = 用户选择了放弃。
@@ -2431,6 +2620,11 @@ namespace TomatoBiquga
                     UiInvoke(() => lblStatus.Text = string.Format("错字检测 {0}/{1} 章…", n, limit));
                 }
 
+                // ---- AI 裁决（可选，默认关）----
+                // 只把"两个源写法不同、不知道哪个对"的高可疑差异交给大模型，
+                // 而且只发差异点前后十几个字 —— 成本与隐私都压到最小。
+                var aiStats = RunAiIfEnabled(result, Log);
+
                 // 写报告
                 string repPath = null, csvPath = null;
                 try
@@ -2446,6 +2640,7 @@ namespace TomatoBiquga
                 catch (Exception ex) { Log("写报告失败：" + ex.Message); }
 
                 Log(result.Summary());
+                if (aiStats != null) Log(aiStats.Summary());
                 if (repPath != null) Log("报告：" + repPath);
 
                 if (SuppressDialogs) return;
@@ -2461,10 +2656,82 @@ namespace TomatoBiquga
                         result.Diffs.Count, result.PerChapter.Count);
 
                 MessageBox.Show(string.Format(
-                    "错字检测完成！\n\n{0}\n\n{1}\n\n报告位置：\n{2}",
-                    result.Summary(), tip, repPath ?? "(写报告失败)"),
+                    "错字检测完成！\n\n{0}\n\n{1}\n\n{2}报告位置：\n{3}",
+                    result.Summary(),
+                    aiStats != null && aiStats.Verdicts > 0 ? aiStats.Summary() + "\n" : "",
+                    tip, repPath ?? "(写报告失败)"),
                     "检测错字", MessageBoxButtons.OK, MessageBoxIcon.Information);
             });
+        }
+
+        /// <summary>
+        /// 如果用户开了 AI，就对这次比对结果跑一轮裁决。
+        /// 返回 null = 没跑（没开 / 配置不全 / 用户拒绝）。
+        ///
+        /// 三条克制（都是刻意的）：
+        ///   · **默认关**：不开就完全不联网、不花钱。
+        ///   · **先估成本再问**：告诉用户要发多少处、大约多少 token，由他确认。
+        ///   · **失败不抛**：AiAdjudicator.Run 承诺不抛异常，AI 挂了报告照出。
+        /// </summary>
+        internal AiAdjudicator.SessionStats RunAiIfEnabled(TypoFinder.Result result, Action<string> log)
+        {
+            if (result == null || !_settings.AiEnabled) return null;
+
+            var cfg = new AiAdjudicator.Config
+            {
+                Backend = _settings.AiBackend,
+                BaseUrl = _settings.AiBaseUrl,
+                Model = _settings.AiModel,
+                ApiKey = _settings.AiApiKey,
+                BatchSize = _settings.AiBatchSize,
+            };
+
+            var bad = cfg.Validate();
+            if (bad != null)
+            {
+                if (log != null) log("AI 已开启但配置不完整，跳过 AI 裁决：" + bad);
+                return null;
+            }
+
+            // 只挑"高可疑"的，先给用户看成本
+            var cand = AiAdjudicator.PickCandidates(result.Diffs);
+            if (cand.Count == 0)
+            {
+                if (log != null) log("AI：没有需要裁决的高可疑差异（其余属于站点排版差异，不值得送 AI）。");
+                return null;
+            }
+            int chars, tokens;
+            AiAdjudicator.Estimate(result.Diffs, cand, out chars, out tokens);
+
+            if (!SuppressDialogs)
+            {
+                var who = cfg.IsCloud
+                    ? "【云端】" + cfg.Model + "\n差异片段会被发送到 " + cfg.BaseUrl
+                    : "【本地】" + cfg.Model + "（不联网到外部）";
+                var r = MessageBox.Show(this,
+                    string.Format(
+                        "要用 AI 裁决这 {0} 处高可疑差异吗？\n\n" +
+                        "后端：{1}\n\n" +
+                        "只发**差异点前后十几个字**，不发整章、不发整本。\n" +
+                        "预计发出约 {2:N0} 字符（≈{3:N0} token）。\n\n" +
+                        "（AI 也会判断错，重要的地方请自己复核）",
+                        cand.Count, who, chars, tokens),
+                    "AI 裁决错字", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes)
+                {
+                    if (log != null) log("用户跳过了 AI 裁决。");
+                    return null;
+                }
+            }
+
+            var verdicts = new AiAdjudicator.VerdictResult[result.Diffs.Count];
+            var stats = new AiAdjudicator.SessionStats();
+            AiAdjudicator.Run(result.Diffs, verdicts, cfg, log, () => _cancel, stats);
+
+            // 注意：裁决已经由 run 写回 result.Diffs[i].Ai（报告/CSV 直接读那里），
+            // 这里不需要再抄一遍 —— 之前正是因为"抄写"留给了调用方，探针漏抄才出的 bug。
+
+            return stats;
         }
 
         /// <summary>让用户选对照源（用最简的输入框，避免为一个小选择再写一个对话框）</summary>

@@ -170,6 +170,10 @@ namespace TomatoBiquga
                 TestQueuePersistence(work);
                 // 目录遍历断点续爬
                 TestCrawlResume();
+                // AI 裁决错字（纯函数部分）
+                TestAiAdjudicator();
+                // 配置项往返
+                TestSettingsRoundTrip(work);
             }
             catch (Exception ex)
             {
@@ -871,6 +875,8 @@ namespace TomatoBiquga
                                 "书架", "任务队列", "检查更新",
                                 // 第三批：站点探活 + 错字检测（双源比对）
                                 "检测站点", "检测错字",
+                                // 第四批：AI 裁决错字
+                                "AI 设置",
                             })
                             {
                                 Check("按钮在位：" + want + "（" + where + "）", texts.Contains(want));
@@ -2811,6 +2817,304 @@ namespace TomatoBiquga
                 }
             }
             return order;
+        }
+
+        // ============================================================
+        //  18) AI 裁决错字（纯函数部分，不联网）
+        // ============================================================
+
+        /// <summary>
+        /// AI 裁决错字的**可离线验证**部分：可疑度筛选、成本估算、
+        /// 提示词构造、请求体/URL 构造、以及**响应解析**。
+        ///
+        /// 为什么响应解析要测得这么细：小模型（尤其本地 7B）经常不照格式回答 ——
+        /// 多写解释、用全角竖线、加 markdown 列表符号、少给字段。
+        /// 解析器容错不够的话，用户花时间跑完一轮 AI，得到的却是"全部未裁决"。
+        /// 所以下面把各种脏输出都喂一遍。
+        /// </summary>
+        private static void TestAiAdjudicator()
+        {
+            // ---------- 可疑度筛选 ----------
+            var typo = new TypoFinder.Diff
+            {
+                Kind = TypoFinder.DiffKind.Replace,
+                Primary = "现", Other = "現", Context = "…他后来发【现】，这里…",
+            };
+            Check("AI 筛选：单字差异算高可疑", AiAdjudicator.IsHighSuspicion(typo));
+
+            var adDiff = new TypoFinder.Diff
+            {
+                Kind = TypoFinder.DiffKind.Replace,
+                Primary = "x", Other = "y",
+                Context = "两源字数相差过大（100 vs 900），疑似站点差异而非错字，已跳过逐字比对",
+            };
+            Check("AI 筛选：站点差异不算高可疑（别浪费钱）", !AiAdjudicator.IsHighSuspicion(adDiff));
+
+            var longDiff = new TypoFinder.Diff
+            {
+                Kind = TypoFinder.DiffKind.Replace,
+                Primary = "一段很长的排版差异内容", Other = "短", Context = "ctx",
+            };
+            Check("AI 筛选：长度差过大不算高可疑", !AiAdjudicator.IsHighSuspicion(longDiff));
+
+            var extraDiff = new TypoFinder.Diff
+            {
+                Kind = TypoFinder.DiffKind.ExtraInPrimary, Primary = "走走", Other = "", Context = "ctx",
+            };
+            Check("AI 筛选：多字/漏字不送 AI（AI 判该不该补词不稳）",
+                !AiAdjudicator.IsHighSuspicion(extraDiff));
+
+            var punctDiff = new TypoFinder.Diff
+            {
+                Kind = TypoFinder.DiffKind.Replace, Primary = ",", Other = "。", Context = "ctx",
+            };
+            Check("AI 筛选：纯标点差异不送", !AiAdjudicator.IsHighSuspicion(punctDiff));
+
+            Check("AI 筛选：null 安全", !AiAdjudicator.IsHighSuspicion(null));
+
+            var all = new List<TypoFinder.Diff> { typo, adDiff, extraDiff, punctDiff };
+            var cand = AiAdjudicator.PickCandidates(all);
+            Eq("AI 筛选：4 条里只挑出 1 条高可疑", 1, cand.Count);
+            Eq("AI 筛选：挑中的是那条单字差异", 0, cand.Count > 0 ? cand[0] : -1);
+
+            int chars, tokens;
+            AiAdjudicator.Estimate(all, cand, out chars, out tokens);
+            Check("AI 估算：给出正的数字符数（" + chars + "）", chars > 0);
+            Eq("AI 估算：token 估算等于字符数（中文约 1 字 1 token）", chars, tokens);
+            AiAdjudicator.Estimate(null, null, out chars, out tokens);
+            Eq("AI 估算：null 安全", 0, chars);
+
+            // ---------- 配置校验 ----------
+            var local = new AiAdjudicator.Config
+            {
+                Backend = "ollama", BaseUrl = "http://127.0.0.1:11434", Model = "qwen2.5:7b",
+            };
+            Check("AI 配置：本地 Ollama 不需要 key", local.Validate() == null);
+            Check("AI 配置：本地不算云端", !local.IsCloud);
+
+            var cloudNoKey = new AiAdjudicator.Config
+            {
+                Backend = "openai", BaseUrl = "https://api.deepseek.com", Model = "deepseek-chat",
+            };
+            Check("AI 配置：云端缺 key 要报错", cloudNoKey.Validate() != null);
+            Contains("AI 配置：报错里告诉用户怎么改",
+                cloudNoKey.Validate() ?? "", "本地 Ollama");
+
+            cloudNoKey.ApiKey = "sk-test";
+            Check("AI 配置：补上 key 后通过", cloudNoKey.Validate() == null);
+
+            var noModel = new AiAdjudicator.Config { Backend = "ollama", BaseUrl = "http://127.0.0.1:11434" };
+            Check("AI 配置：缺模型名要报错", noModel.Validate() != null);
+
+            var wrongBackend = new AiAdjudicator.Config
+            {
+                Backend = "ollama", BaseUrl = "https://api.deepseek.com", Model = "x",
+            };
+            Check("AI 配置：选了本地但地址是外网，要提醒", wrongBackend.Validate() != null);
+
+            // ---------- URL 构造 ----------
+            Eq("AI URL：Ollama 默认地址",
+                "http://127.0.0.1:11434/api/chat", AiAdjudicator.BuildUrl(local));
+            var cloud = new AiAdjudicator.Config
+            {
+                Backend = "openai", BaseUrl = "https://api.deepseek.com", Model = "deepseek-chat", ApiKey = "k",
+            };
+            Eq("AI URL：云端自动补 /v1/chat/completions",
+                "https://api.deepseek.com/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+            cloud.BaseUrl = "https://api.deepseek.com/v1";
+            Eq("AI URL：用户已经带 /v1 时不重复拼",
+                "https://api.deepseek.com/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+            cloud.BaseUrl = "https://x/v1/chat/completions";
+            Eq("AI URL：用户填了完整路径就原样用",
+                "https://x/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+
+            // ---------- 请求体 ----------
+            var bodyLocal = AiAdjudicator.BuildRequestBody(local, "test");
+            Contains("AI 请求体：本地带 stream=false（要好一次性返回）", bodyLocal, "\"stream\":false");
+            Contains("AI 请求体：带上模型名", bodyLocal, "qwen2.5:7b");
+            Contains("AI 请求体：temperature 为 0（裁决要稳定，不要发挥）", bodyLocal, "\"temperature\":0");
+
+            var bodyCloud = AiAdjudicator.BuildRequestBody(cloud, "test");
+            Contains("AI 请求体：云端是 messages 结构", bodyCloud, "\"messages\"");
+            Check("AI 请求体：云端不带 stream 字段（默认非流式）",
+                bodyCloud.IndexOf("\"stream\"", StringComparison.Ordinal) < 0);
+
+            var nasty = "他说\"你好\"\n换行\\反斜杠\ttab";
+            var nb = AiAdjudicator.BuildRequestBody(local, nasty);
+            Contains("AI 请求体：引号被转义", nb, "\\\"你好\\\"");
+            Contains("AI 请求体：换行被转义", nb, "\\n");
+            Contains("AI 请求体：反斜杠被转义", nb, "\\\\");
+            Check("AI 请求体：不含裸换行", nb.IndexOf('\n') < 0);
+
+            var h = AiAdjudicator.BuildHeaders(cloud);
+            Check("AI 头：云端带 Authorization", h.ContainsKey("Authorization"));
+            Contains("AI 头：Bearer 前缀", h["Authorization"], "Bearer ");
+            var h2 = AiAdjudicator.BuildHeaders(local);
+            Check("AI 头：本地不带 Authorization（Ollama 不需要）", !h2.ContainsKey("Authorization"));
+            Check("AI 头：都声明 JSON", h["Content-Type"] == "application/json");
+
+            // ---------- 提示词 ----------
+            var batch = new List<int> { 0 };
+            var msg = AiAdjudicator.BuildUserMessage(all, batch);
+            Contains("AI 提示词：给出上下文", msg, "他后来发");
+            Contains("AI 提示词：标出差异处", msg, "【现】");
+            Contains("AI 提示词：写法A", msg, "写法A：现");
+            Contains("AI 提示词：写法B", msg, "写法B：現");
+            // 只发片段，不发整章 —— 这是成本与隐私的关键
+            Check("AI 提示词：长度很短（只发差异点上下文，" + msg.Length + " 字符）", msg.Length < 400);
+            Contains("AI 系统提示词：明确禁止改写上下文",
+                AiAdjudicator.SystemPrompt, "绝对不要改写");
+            Contains("AI 系统提示词：拿不准要选 U", AiAdjudicator.SystemPrompt, "拿不准就选 U");
+
+            // ---------- 响应解析（重点：各种脏输出）----------
+            const int n = 4;
+            var clean = "1|A|用字正确|\n2|B|主源错字|\n3|C|两边都不对|正确写法\n4|U|无法判断|";
+            var r = AiAdjudicator.ParseReply(clean, n);
+            Eq("AI 解析：条数", n, r.Count);
+            Eq("AI 解析：A → 主源对", AiAdjudicator.Verdict.PrimaryRight, r[0].Verdict);
+            Eq("AI 解析：B → 对照源对", AiAdjudicator.Verdict.OtherRight, r[1].Verdict);
+            Eq("AI 解析：C → 两边都不对", AiAdjudicator.Verdict.BothWrong, r[2].Verdict);
+            Eq("AI 解析：C 带建议写法", "正确写法", r[2].Suggestion);
+            Eq("AI 解析：U → 判断不了", AiAdjudicator.Verdict.Unsure, r[3].Verdict);
+            Eq("AI 解析：理由被读出来", "主源错字", r[1].Reason);
+
+            Eq("AI 解析：容忍全角竖线", AiAdjudicator.Verdict.PrimaryRight,
+                AiAdjudicator.ParseReply("1｜A｜理由", 1)[0].Verdict);
+
+            var markdown = "- 1|A|带列表符号\n```\n2|B|x\n```";
+            var r2 = AiAdjudicator.ParseReply(markdown, 2);
+            Eq("AI 解析：容忍列表符号", AiAdjudicator.Verdict.PrimaryRight, r2[0].Verdict);
+            Eq("AI 解析：跳过代码块围栏", AiAdjudicator.Verdict.OtherRight, r2[1].Verdict);
+
+            Eq("AI 解析：结论带括号说明也认", AiAdjudicator.Verdict.PrimaryRight,
+                AiAdjudicator.ParseReply("1|A（写法A正确）|x", 1)[0].Verdict);
+            Eq("AI 解析：小写也认", AiAdjudicator.Verdict.OtherRight,
+                AiAdjudicator.ParseReply("1|b|理由", 1)[0].Verdict);
+
+            var messy = "好的，我来分析：\n\n1|A|正确\n\n以上就是我的判断。";
+            var r3 = AiAdjudicator.ParseReply(messy, 3);
+            Eq("AI 解析：缺失的条目填未裁决", AiAdjudicator.Verdict.None, r3[1].Verdict);
+            Eq("AI 解析：能认出夹在废话里的那条", AiAdjudicator.Verdict.PrimaryRight, r3[0].Verdict);
+            Eq("AI 解析：废话行不被误判", AiAdjudicator.Verdict.None, r3[2].Verdict);
+
+            Eq("AI 解析：越界序号被忽略", AiAdjudicator.Verdict.None,
+                AiAdjudicator.ParseReply("9|A|x", 2)[1].Verdict);
+            Eq("AI 解析：序号非数字被忽略", AiAdjudicator.Verdict.None,
+                AiAdjudicator.ParseReply("abc|A|x", 1)[0].Verdict);
+            Eq("AI 解析：空回复返回全未裁决", AiAdjudicator.Verdict.None,
+                AiAdjudicator.ParseReply("", 2)[0].Verdict);
+            Eq("AI 解析：null 回复返回全未裁决", AiAdjudicator.Verdict.None,
+                AiAdjudicator.ParseReply(null, 2)[0].Verdict);
+            Eq("AI 解析：expectedCount=0 安全", 0, AiAdjudicator.ParseReply("x", 0).Count);
+
+            var longSug = "1|C|理由|这是一整句很长的话不该被当成单字建议";
+            Eq("AI 解析：过长的建议写法被丢弃", "",
+                AiAdjudicator.ParseReply(longSug, 1)[0].Suggestion);
+            Eq("AI 解析：丢弃建议但保留结论", AiAdjudicator.Verdict.BothWrong,
+                AiAdjudicator.ParseReply(longSug, 1)[0].Verdict);
+
+            Contains("AI 结论文本：主源对", r[0].VerdictText(), "主源正确");
+            Contains("AI 结论文本：两边都不对时带建议", r[2].VerdictText(), "正确写法");
+
+            // ---------- 响应体提取（两种后端字段名不同）----------
+            var openaiJson = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"1|A|x\"}}]}";
+            Eq("AI 响应：OpenAI 格式能取到 content", "1|A|x",
+                AiAdjudicator.ExtractContent(openaiJson, cloud));
+
+            var ollamaJson = "{\"model\":\"qwen\",\"message\":{\"role\":\"assistant\",\"content\":\"1|B|y\"},\"done\":true}";
+            Eq("AI 响应：Ollama 格式能取到 content", "1|B|y",
+                AiAdjudicator.ExtractContent(ollamaJson, local));
+
+            var tricky = "{\"message\":{\"content\":\"1|A|含{}括号和\\\"引号\\\"\"}}";
+            Eq("AI 响应：content 里的花括号/引号不影响解析", "1|A|含{}括号和\"引号\"",
+                AiAdjudicator.ExtractContent(tricky, local));
+
+            var errJson = "{\"error\":{\"message\":\"model 'x' not found\",\"type\":\"invalid_request\"}}";
+            Contains("AI 响应：能挖出错误信息", AiAdjudicator.ExtractError(errJson), "not found");
+            Eq("AI 响应：错误响应取不到 content", null,
+                AiAdjudicator.ExtractContent(errJson, local));
+            Eq("AI 响应：空输入安全", null, AiAdjudicator.ExtractContent("", local));
+            Eq("AI 响应：null 安全", null, AiAdjudicator.ExtractContent(null, local));
+        }
+
+        // ============================================================
+        //  19) 配置项往返（专抓"解析了但没接上"）
+        // ============================================================
+
+        /// <summary>
+        /// 配置项的**往返**：存下去再读回来，每个键都必须一致。
+        ///
+        /// 为什么值得单独测：这个项目刚踩过一次 —— `AiBatchSize` 在 Load 里解析了、
+        /// 但 `Set()` 的 switch 里忘了加分支，于是**用户配 7 也永远生效成 10**，
+        /// 而且不报任何错。这类"解析了但没接上"的问题只有往返断言能发现，
+        /// 单看"文件里写对了吗"是发现不了的。
+        /// </summary>
+        private static void TestSettingsRoundTrip(string work)
+        {
+            var path = Path.Combine(work, "settings-roundtrip.ini");
+
+            var s = new AppSettings
+            {
+                BiqugaOfflineWorkers = 12,
+                BiqugaOnlineWorkers = 5,
+                BiqugaPcWorkers = 4,
+                MinDelayMs = 111,
+                MaxDelayMs = 999,
+                CrawlTimeoutMinutes = 42,
+                RetryPasses = 2,
+                OutputTraditional = true,
+            };
+            s.Save(path);
+            var b = AppSettings.Load(path);
+            Eq("设置往返：离线并发", 12, b.BiqugaOfflineWorkers);
+            Eq("设置往返：在线并发", 5, b.BiqugaOnlineWorkers);
+            Eq("设置往返：PC 并发", 4, b.BiqugaPcWorkers);
+            Eq("设置往返：最小间隔", 111, b.MinDelayMs);
+            Eq("设置往返：最大间隔", 999, b.MaxDelayMs);
+            Eq("设置往返：遍历超时", 42, b.CrawlTimeoutMinutes);
+            Eq("设置往返：重试轮数", 2, b.RetryPasses);
+            Eq("设置往返：输出繁体", true, b.OutputTraditional);
+
+            // AI 配置：字符串 + 一个数值，最容易出现"解析了但没接上"
+            var a = new AppSettings
+            {
+                AiEnabled = true,
+                AiBackend = "openai",
+                AiBaseUrl = "https://api.deepseek.com",
+                AiModel = "deepseek-chat",
+                AiApiKey = "sk-test-key-123",
+                AiBatchSize = 7,
+            };
+            a.Save(path);
+            var ab = AppSettings.Load(path);
+            Eq("设置往返：AI 开关", true, ab.AiEnabled);
+            Eq("设置往返：AI 后端", "openai", ab.AiBackend);
+            Eq("设置往返：AI 地址", "https://api.deepseek.com", ab.AiBaseUrl);
+            Eq("设置往返：AI 模型", "deepseek-chat", ab.AiModel);
+            Eq("设置往返：AI Key", "sk-test-key-123", ab.AiApiKey);
+            // ★ 这一条就是那个 bug 的守卫
+            Eq("设置往返：AI 批大小（曾忘在 Set 里接，配 7 也变 10）", 7, ab.AiBatchSize);
+
+            // AI 默认必须是关的：这个工具一直守"不把内容交给第三方"，
+            // 默认开等于偷偷改变了这个姿态。
+            var def = AppSettings.Load(Path.Combine(work, "不存在的配置.ini"));
+            Eq("设置默认值：AI 默认关闭", false, def.AiEnabled);
+            Eq("设置默认值：AI 默认用本地后端", "ollama", def.AiBackend);
+            Eq("设置默认值：AI 未填模型（不填就用不了）", "", def.AiModel);
+            Eq("设置默认值：AI 未填 Key", "", def.AiApiKey);
+
+            // 越界/写坏的值要被夹住或忽略（坏 ini 不能让程序崩）
+            File.WriteAllText(path,
+                "AiBatchSize=999\nBiqugaOfflineWorkers=0\nRetryPasses=99\nOutputTraditional=maybe\n",
+                new UTF8Encoding(true));
+            var c = AppSettings.Load(path);
+            Check("设置夹取：批大小被夹到 1~50（" + c.AiBatchSize + "）",
+                c.AiBatchSize >= 1 && c.AiBatchSize <= 50);
+            Check("设置夹取：并发被夹到 ≥1", c.BiqugaOfflineWorkers >= 1);
+            Check("设置夹取：重试轮数被夹到 ≤3", c.RetryPasses <= 3);
+            Eq("设置夹取：非布尔的布尔值不改变默认", false, c.OutputTraditional);
+
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
         }
 
         // ============================================================

@@ -45,6 +45,27 @@ namespace TomatoBiquga
             /// <summary>差异类型</summary>
             public DiffKind Kind = DiffKind.Replace;
 
+            /// <summary>
+            /// AI 裁决结果（没跑 AI 就是 None）。由 AiAdjudicator 填。
+            /// 放在 Diff 上而不是另开一张表：报告、CSV、界面都要按差异逐条展示，
+            /// 分开存会导致三处各自做一次下标对齐，容易错位。
+            /// </summary>
+            public AiAdjudicator.VerdictResult Ai;
+
+            /// <summary>AI 裁决的短标签（给 CSV / 列表用）</summary>
+            public string AiText()
+            {
+                if (Ai == null || Ai.Verdict == AiAdjudicator.Verdict.None) return "";
+                switch (Ai.Verdict)
+                {
+                    case AiAdjudicator.Verdict.PrimaryRight: return "主源正确";
+                    case AiAdjudicator.Verdict.OtherRight: return "主源错";
+                    case AiAdjudicator.Verdict.BothWrong:
+                        return Ai.Suggestion.Length > 0 ? "都不对→" + Ai.Suggestion : "都不对";
+                    default: return "判断不了";
+                }
+            }
+
             public override string ToString()
             {
                 return string.Format("{0} @{1}  {2} → {3}", Chapter, Position,
@@ -271,7 +292,16 @@ namespace TomatoBiquga
             sb.AppendLine("  · 字数一致却不同 → 最可能就是错字（下面前两类）。");
             sb.AppendLine("  · 一边多一边少 → 多为漏字/多字；也可能是站点广告没洗净。");
             sb.AppendLine("  · **两个源都错同一个字时检测不出来**（只能靠第三个源或人工）。");
+            if (HasAi(r))
+            {
+                sb.AppendLine("  · 带【AI】标记的行是交给大模型裁决过的：它会指出哪个写法对，");
+                sb.AppendLine("    或者两个都不对时给出建议写法。AI 也可能判断错，重要处请自己复核。");
+            }
             sb.AppendLine();
+
+            // AI 已经明确判定"主源这里错了"的，单独拎到最前面 ——
+            // 这是用户真正要改的地方，埋在几百条里等于没找到。
+            WriteAiConfirmed(sb, r);
 
             // 按类型分组
             WriteGroup(sb, r, DiffKind.Replace, "【一】字数一致但用字不同（最可能是错字）");
@@ -281,6 +311,42 @@ namespace TomatoBiquga
             if (r.Diffs.Count == 0)
                 sb.AppendLine("两个源逐字一致，没有发现差异。");
             return sb.ToString();
+        }
+
+        private static bool HasAi(Result r)
+        {
+            foreach (var d in r.Diffs)
+                if (d.Ai != null && d.Ai.Verdict != AiAdjudicator.Verdict.None) return true;
+            return false;
+        }
+
+        /// <summary>把 AI 判定"主源确实错了"的差异汇总到报告最前面（待改清单）</summary>
+        private static void WriteAiConfirmed(StringBuilder sb, Result r)
+        {
+            var confirmed = new List<Diff>();
+            foreach (var d in r.Diffs)
+            {
+                if (d.Ai == null) continue;
+                if (d.Ai.Verdict == AiAdjudicator.Verdict.OtherRight ||
+                    d.Ai.Verdict == AiAdjudicator.Verdict.BothWrong)
+                    confirmed.Add(d);
+            }
+            if (confirmed.Count == 0) return;
+
+            sb.AppendLine("★ 待改清单（AI 判定这些位置的主源写法有问题）　共 " + confirmed.Count + " 处");
+            sb.AppendLine(new string('-', 60));
+            foreach (var d in confirmed)
+            {
+                var fix = d.Ai.Verdict == AiAdjudicator.Verdict.BothWrong && d.Ai.Suggestion.Length > 0
+                    ? d.Ai.Suggestion
+                    : d.Other;
+                sb.AppendLine(string.Format("{0} @{1}　「{2}」→「{3}」{4}",
+                    d.Chapter, d.Position, d.Primary, fix,
+                    d.Ai.Reason.Length > 0 ? "　（" + d.Ai.Reason + "）" : ""));
+            }
+            sb.AppendLine();
+            sb.AppendLine("（要精确替换，用同目录的 错字检测报告.csv 按「位置」列定位）");
+            sb.AppendLine();
         }
 
         private static void WriteGroup(StringBuilder sb, Result r, DiffKind kind, string header)
@@ -297,6 +363,9 @@ namespace TomatoBiquga
                 if (!string.IsNullOrEmpty(d.Context)) sb.AppendLine("  上下文：" + d.Context);
                 sb.AppendLine(string.Format("  主源　：{0}", d.Primary.Length == 0 ? "(无)" : d.Primary));
                 sb.AppendLine(string.Format("  对照源：{0}", d.Other.Length == 0 ? "(无)" : d.Other));
+                if (d.Ai != null && d.Ai.Verdict != AiAdjudicator.Verdict.None)
+                    sb.AppendLine(string.Format("  【AI】{0}{1}", d.Ai.VerdictText(),
+                        d.Ai.Reason.Length > 0 ? "　理由：" + d.Ai.Reason : ""));
                 sb.AppendLine();
             }
         }
@@ -305,15 +374,19 @@ namespace TomatoBiquga
         public static string BuildCsv(Result r)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("章节,位置,类型,主源,对照源,上下文");
+            sb.AppendLine("章节,位置,类型,主源,对照源,上下文,AI结论,AI建议");
             foreach (var d in r.Diffs)
             {
+                var sug = (d.Ai != null && d.Ai.Verdict == AiAdjudicator.Verdict.BothWrong)
+                    ? d.Ai.Suggestion : "";
                 sb.Append(Csv(d.Chapter)).Append(',')
                   .Append(d.Position).Append(',')
                   .Append(KindName(d.Kind)).Append(',')
                   .Append(Csv(d.Primary)).Append(',')
                   .Append(Csv(d.Other)).Append(',')
-                  .Append(Csv(d.Context)).Append('\n');
+                  .Append(Csv(d.Context)).Append(',')
+                  .Append(Csv(d.AiText())).Append(',')
+                  .Append(Csv(sug)).Append('\n');
             }
             return sb.ToString();
         }

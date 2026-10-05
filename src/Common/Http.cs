@@ -146,6 +146,52 @@ namespace TomatoBiquga
         private const string ApiAccept = "application/vnd.github+json";
 
         /// <summary>
+        /// 发一个 JSON POST（AI 接口用）。
+        ///
+        /// 为什么单独开：普通 Post() 硬编码了
+        /// `Content-Type: application/x-www-form-urlencoded`，也没有自定义头的口子，
+        /// 而 AI 接口（OpenAI 兼容 / Ollama）都要求 JSON body，
+        /// 云端还要 `Authorization: Bearer ...`。
+        ///
+        /// 注意两个后端都要走一遍：这里的 header 参数是给 curl 用的，
+        /// .NET 回退那条路也要把同样的头带上，否则一换后端就 401。
+        /// </summary>
+        public static string PostJson(string url, string jsonBody, Dictionary<string, string> headers,
+            int timeoutSeconds = 0)
+        {
+            int oldTimeout = TimeoutSeconds;
+            int oldRetries = MaxRetries;
+            try
+            {
+                // AI 调用常常要几十秒（尤其本地小模型），而且**不要自动重试** ——
+                // 重试会让一次慢请求变成三次慢请求，用户会以为程序卡死。
+                if (timeoutSeconds > 0) TimeoutSeconds = timeoutSeconds;
+                MaxRetries = 1;
+
+                try
+                {
+                    if (CurlAvailable) return FetchWithCurl(url, jsonBody, null, null, "application/json", headers);
+                    return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers);
+                }
+                catch (Exception ex)
+                {
+                    // 后端回退：curl 不通时试 .NET（本地 Ollama 有时候 curl 会有代理干扰）
+                    if (CurlAvailable)
+                    {
+                        try { return FetchWithDotNet(url, jsonBody, null, null, "application/json", headers); }
+                        catch { }
+                    }
+                    throw new Exception("AI 接口请求失败：" + ex.Message);
+                }
+            }
+            finally
+            {
+                TimeoutSeconds = oldTimeout;
+                MaxRetries = oldRetries;
+            }
+        }
+
+        /// <summary>
         /// 抓二进制内容（封面图片用）。
         /// 为什么单独开一个：Request 走的是 Decode()（按 charset 解成字符串），
         /// 图片按那条路会被 UTF-8 解码毁掉字节。
@@ -395,7 +441,8 @@ namespace TomatoBiquga
         // ---------------------------------------------------------- curl 后端
 
         private static string FetchWithCurl(string url, string body, string referer,
-            string userAgent = null, string accept = null)
+            string userAgent = null, string accept = null,
+            Dictionary<string, string> extraHeaders = null)
         {
             var tmp = Path.Combine(Path.GetTempPath(), "tb_" + Guid.NewGuid().ToString("N") + ".html");
             try
@@ -413,9 +460,28 @@ namespace TomatoBiquga
                     args.Append(" -b \"").Append(Cookie.Replace("\"", "\\\"")).Append('"');
                 if (!string.IsNullOrEmpty(Proxy))
                     args.Append(" -x \"").Append(Proxy).Append('"');
+                // 自定义头（AI 接口的 Authorization 等）
+                bool jsonBody = false;
+                if (extraHeaders != null)
+                {
+                    foreach (var kv in extraHeaders)
+                    {
+                        if (string.IsNullOrEmpty(kv.Key)) continue;
+                        if (string.Equals(kv.Key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+                        {
+                            jsonBody = kv.Value != null &&
+                                       kv.Value.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0;
+                            continue;   // Content-Type 交给下面 body 分支统一处理
+                        }
+                        args.Append(" -H \"").Append(kv.Key).Append(": ")
+                            .Append((kv.Value ?? "").Replace("\"", "\\\"")).Append('"');
+                    }
+                }
                 if (body != null)
                 {
-                    args.Append(" -X POST -H \"Content-Type: application/x-www-form-urlencoded\"");
+                    args.Append(" -X POST -H \"Content-Type: ")
+                        .Append(jsonBody ? "application/json" : "application/x-www-form-urlencoded")
+                        .Append('"');
                     args.Append(" --data-binary \"").Append(body.Replace("\"", "\\\"")).Append('"');
                 }
                 args.Append(" -o \"").Append(tmp).Append('"');
@@ -497,7 +563,8 @@ namespace TomatoBiquga
         // ---------------------------------------------------------- 原生后端
 
         private static string FetchWithDotNet(string url, string body, string referer,
-            string userAgent = null, string accept = null)
+            string userAgent = null, string accept = null,
+            Dictionary<string, string> extraHeaders = null)
         {
             LastStatusCode = 0;
             var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
@@ -515,6 +582,24 @@ namespace TomatoBiquga
             if (!string.IsNullOrEmpty(referer)) req.Referer = referer;
             if (!string.IsNullOrEmpty(Cookie)) req.Headers["Cookie"] = Cookie;
 
+            // 自定义头（AI 接口的 Authorization 等）
+            bool jsonBody = false;
+            if (extraHeaders != null)
+            {
+                foreach (var kv in extraHeaders)
+                {
+                    if (string.IsNullOrEmpty(kv.Key)) continue;
+                    if (string.Equals(kv.Key, "Content-Type", StringComparison.OrdinalIgnoreCase))
+                    {
+                        jsonBody = kv.Value != null &&
+                                   kv.Value.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0;
+                        continue;   // 交给下面的 body 分支
+                    }
+                    try { req.Headers[kv.Key] = kv.Value ?? ""; }
+                    catch { /* 受限头（如 Host）设不进去就跳过，不能让整次请求失败 */ }
+                }
+            }
+
             // 代理：http/https 走 WebProxy；socks 只有 curl 后端支持（.NET 4.8 原生不支持
             // SOCKS），这种情况下静默忽略，由 curl 后端承担 —— 不要在这里抛异常，
             // 否则用户开了 SOCKS 代理反而连直连都用不了。
@@ -527,7 +612,9 @@ namespace TomatoBiquga
             if (body != null)
             {
                 var b = Encoding.UTF8.GetBytes(body);
-                req.ContentType = "application/x-www-form-urlencoded; charset=UTF-8";
+                req.ContentType = jsonBody
+                    ? "application/json; charset=UTF-8"
+                    : "application/x-www-form-urlencoded; charset=UTF-8";
                 req.ContentLength = b.Length;
                 using (var s = req.GetRequestStream()) s.Write(b, 0, b.Length);
             }
