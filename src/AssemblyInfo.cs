@@ -23,9 +23,11 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.2.1：修掉"按钮文字被压成省略号"（MakeButton 写死宽度 + AutoEllipsis，
-//        在中文系统 + 非 100% 缩放下整排按钮只显示「搜…」「载入…」），
-//        程序标题的版本号改成从程序集读（原来硬编码 v1.0.5，发到 1.2.0 还显示 1.0.5）。
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
-[assembly: AssemblyInformationalVersion("1.2.1")]
+// 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
+//        只把双源比对里"两边写法不同、不知道哪个对"的高可疑差异交给大模型，
+//        只发差异点前后十几个字 —— 成本与隐私暴露面都压到最小。
+// 1.2.1：修掉"按钮文字被压成省略号"（MakeButton 写死宽度 + AutoEllipsis）；
+//        标题版本号改成从程序集读（原来硬编码 v1.0.5，发到 1.2.0 还显示 1.0.5）。
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyInformationalVersion("1.3.0")]
