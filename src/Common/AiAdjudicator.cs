@@ -359,24 +359,80 @@ namespace TomatoBiquga
             return sb.ToString();
         }
 
-        /// <summary>请求 URL</summary>
-        internal static string BuildUrl(Config cfg)
+        /// <summary>
+        /// 候选请求 URL，**按顺序试**。
+        ///
+        /// 为什么要"试一串"而不是算一个：各家的 base_url 形状太多了，我每见一家
+        /// 就得改一次拼装逻辑，而且每次都是被真实用户撞出来的：
+        ///   · OpenAI / DeepSeek  → https://api.deepseek.com          需要补 /v1
+        ///   · 智谱               → .../api/paas/v4                    带版本段但不是 v1
+        ///   · 商汤日日新         → .../compatible-mode/v2             同上，且形态又不同
+        ///   · 有的中转直接给完整 → .../v1/chat/completions
+        ///
+        /// 与其继续猜，不如**先照用户填的原样试**（他要是从文档复制的，原样就是对的），
+        /// 只有 404 这种情况才逐级补路径。这样任何形状都能自愈。
+        ///
+        /// 顺序设计：原样 → 补 /chat/completions → 补 /v1/chat/completions。
+        /// 原样排第一很关键 —— 用户从官方文档抄来的完整端点必须原样可用，
+        /// 不能被我们的"聪明"改坏。
+        /// </summary>
+        internal static List<string> BuildUrlCandidates(Config cfg)
         {
+            var list = new List<string>();
             var b = (cfg.BaseUrl ?? "").TrimEnd('/');
+            if (b.Length == 0) return list;
+
             if (cfg.IsCloud)
             {
-                // 已经给了完整路径 → 原样用
-                if (b.IndexOf("/chat/completions", StringComparison.OrdinalIgnoreCase) >= 0) return b;
-                // 已经带版本段（/v1、/v4…）→ 只补最后一段。
-                // ★ 智谱是 /api/paas/v4，**不是** /v1。第一版没考虑"带版本段但不是 v1"，
-                //   拼出了 .../v4/v1/chat/completions —— 用户点一下必然连不上。
-                //   是"每个预设都必须能拼出正确 URL"这条断言把它抓出来的。
-                if (System.Text.RegularExpressions.Regex.IsMatch(b, @"/v\d+$"))
-                    return b + "/chat/completions";
-                return b + "/v1/chat/completions";
+                bool hasEndpoint = b.IndexOf("/chat/completions", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (hasEndpoint) { list.Add(b); return list; }
+
+                list.Add(b);                                    // 用户填的就是完整端点
+                list.Add(b + "/chat/completions");              // 只差最后一段
+                if (!System.Text.RegularExpressions.Regex.IsMatch(b, @"/v\d+$"))
+                    list.Add(b + "/v1/chat/completions");       // 差 /v1 + 最后一段
+                return list;
             }
-            if (b.EndsWith("/api/chat", StringComparison.OrdinalIgnoreCase)) return b;
-            return b + "/api/chat";
+
+            // Ollama
+            if (b.EndsWith("/api/chat", StringComparison.OrdinalIgnoreCase)) { list.Add(b); return list; }
+            list.Add(b + "/api/chat");
+            list.Add(b);                                        // 万一用户填的是完整端点且形态不同
+            return list;
+        }
+
+        /// <summary>
+        /// 请求 URL（单个，取首选）。
+        /// 保留这个入口是因为"每个预设都必须能拼出正确 URL"这类断言要靠它；
+        /// 真正发请求走 <see cref="BuildUrlCandidates"/>。
+        /// </summary>
+        internal static string BuildUrl(Config cfg)
+        {
+            var list = BuildUrlCandidates(cfg);
+            return list.Count > 0 ? list[0] : "";
+        }
+
+        /// <summary>
+        /// 这个错误值不值得换下一个候选 URL 再试。
+        ///
+        /// ★ 关键判断：**只在"路径不对"时换，鉴权失败绝不换。**
+        /// 403/401 是账户权限问题，换十个路径也是 403 ——
+        /// 那样既浪费时间又可能触发风控（商汤那次实测就是一路 403，
+        /// 盲目重试只会把自己打上可疑名单）。
+        /// </summary>
+        internal static bool ShouldTryNextUrl(string errorMessage)
+        {
+            if (string.IsNullOrEmpty(errorMessage)) return false;
+            if (errorMessage.IndexOf("401", StringComparison.Ordinal) >= 0) return false;
+            if (errorMessage.IndexOf("403", StringComparison.Ordinal) >= 0) return false;
+            if (errorMessage.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            if (errorMessage.IndexOf("超时", StringComparison.Ordinal) >= 0) return false;
+            // 路径不对的典型表现：404、NOT_FOUND、no Route matched
+            if (errorMessage.IndexOf("404", StringComparison.Ordinal) >= 0) return true;
+            if (errorMessage.IndexOf("NOT_FOUND", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (errorMessage.IndexOf("Route", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (errorMessage.IndexOf("找不到", StringComparison.Ordinal) >= 0) return true;
+            return false;
         }
 
         /// <summary>
@@ -593,6 +649,16 @@ namespace TomatoBiquga
             });
             list.Add(new CloudPreset
             {
+                Name = "商汤日日新 SenseNova",
+                BaseUrl = "https://api.sensenova.cn/compatible-mode/v2",
+                Model = "SenseChat-5",
+                Note = "base_url 形状特殊（/compatible-mode/v2），程序会自动补全路径。" +
+                       "注意：实测该平台对未开通的凭据返回 403 Forbidden —— " +
+                       "若「测试连接」报 403，请去控制台确认 key 已开通日日新的调用权限。",
+                ConsoleUrl = "https://console.sensecore.cn/aistudio/management/api-key",
+            });
+            list.Add(new CloudPreset
+            {
                 Name = "自定义（其他 OpenAI 兼容服务）",
                 BaseUrl = "",
                 Model = "",
@@ -714,7 +780,16 @@ namespace TomatoBiquga
                     log(string.Format("准备把 {0} 处高可疑差异送 AI 裁决（约 {1:N0} 字符 ≈ {2:N0} token）…",
                         cand.Count, chars, tokens));
 
-                string url = BuildUrl(cfg);
+                var urlCandidates = BuildUrlCandidates(cfg);
+                if (urlCandidates.Count == 0)
+                {
+                    stats.LastError = "服务地址是空的。";
+                    if (log != null) log("AI 服务地址没填，跳过。");
+                    return;
+                }
+                // ★ 记住哪一条通了，后面几批直接用它 —— 不能每批都从头试一遍，
+                //   否则一批 3 次尝试会把请求数翻三倍。
+                int urlIndex = 0;
                 var headers = BuildHeaders(cfg);
                 int batchSize = cfg.BatchSize <= 0 ? 10 : cfg.BatchSize;
 
@@ -729,29 +804,53 @@ namespace TomatoBiquga
                     var batch = cand.GetRange(at, Math.Min(batchSize, cand.Count - at));
                     stats.Requested++;
 
-                    string reply;
+                    string reply = null;
                     string userMsg = BuildUserMessage(diffs, batch);
-                    try
+                    var body = BuildRequestBody(cfg, userMsg);
+
+                    // 路径自适应：只在"路径不对"时换下一条候选（见 ShouldTryNextUrl）
+                    for (int ui = urlIndex; ui < urlCandidates.Count; ui++)
                     {
-                        var body = BuildRequestBody(cfg, userMsg);
-                        var resp = Http.PostJson(url, body, headers, cfg.TimeoutSeconds);
-                        reply = ExtractContent(resp, cfg);
-                        if (string.IsNullOrEmpty(reply))
+                        try
                         {
+                            var resp = Http.PostJson(urlCandidates[ui], body, headers, cfg.TimeoutSeconds);
+                            var content = ExtractContent(resp, cfg);
+                            if (!string.IsNullOrEmpty(content))
+                            {
+                                if (ui != urlIndex && log != null)
+                                    log("  接口路径自适应成功：" + urlCandidates[ui]);
+                                urlIndex = ui;
+                                reply = content;
+                                break;
+                            }
+                            // 连上了但没内容：可能是错误响应
                             var err = ExtractError(resp);
                             stats.LastError = string.IsNullOrEmpty(err)
                                 ? "模型没有返回内容（可能是模型名不对，或服务没起）"
                                 : err;
+                            if (ShouldTryNextUrl(stats.LastError) && ui + 1 < urlCandidates.Count)
+                            {
+                                if (log != null)
+                                    log("  这个路径不对（" + stats.LastError + "），换下一个候选地址…");
+                                continue;
+                            }
                             if (log != null) log("  AI 这一批没返回内容：" + stats.LastError);
-                            continue;
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            stats.LastError = ex.Message;
+                            if (ShouldTryNextUrl(ex.Message) && ui + 1 < urlCandidates.Count)
+                            {
+                                if (log != null)
+                                    log("  这个路径不通（" + ex.Message + "），换下一个候选地址…");
+                                continue;
+                            }
+                            if (log != null) log("  AI 请求失败：" + ex.Message);
+                            break;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        stats.LastError = ex.Message;
-                        if (log != null) log("  AI 请求失败：" + ex.Message);
-                        continue;
-                    }
+                    if (string.IsNullOrEmpty(reply)) continue;
 
                     stats.Succeeded++;
                     stats.SentChars += userMsg.Length;

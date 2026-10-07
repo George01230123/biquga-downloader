@@ -2913,20 +2913,55 @@ namespace TomatoBiquga
             Check("AI 配置：选了本地但地址是外网，要提醒", wrongBackend.Validate() != null);
 
             // ---------- URL 构造 ----------
-            Eq("AI URL：Ollama 默认地址",
-                "http://127.0.0.1:11434/api/chat", AiAdjudicator.BuildUrl(local));
+            // ★ URL 的契约变了：不再"算一个 URL"，而是"给一串候选，按顺序试"。
+            //   原因：各家的 base_url 形状太多，我每见一家就改一次拼装、每次都被真实用户撞出来
+            //   （DeepSeek 要补 /v1；智谱是 /api/paas/v4；商汤是 /compatible-mode/v2）。
+            //   现在**先照用户填的原样试**，只有 404 才逐级补路径。
+            //   所以断言也换了：这些用例真正要保证的是
+            //     (a) 首选必须是用户原样 —— 从官方文档抄来的完整端点不能被我们改坏
+            //     (b) 候选里**必须包含**真正能用的那个 URL
+            var ollamaCands = AiAdjudicator.BuildUrlCandidates(local);
+            Check("AI URL：Ollama 候选非空", ollamaCands.Count > 0);
+            Eq("AI URL：Ollama 首选是补好的 /api/chat",
+                "http://127.0.0.1:11434/api/chat", ollamaCands[0]);
+
             var cloud = new AiAdjudicator.Config
             {
                 Backend = "openai", BaseUrl = "https://api.deepseek.com", Model = "deepseek-chat", ApiKey = "k",
             };
-            Eq("AI URL：云端自动补 /v1/chat/completions",
-                "https://api.deepseek.com/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+            var c1 = AiAdjudicator.BuildUrlCandidates(cloud);
+            Eq("AI URL：首选是用户原样（不被我们改动）", "https://api.deepseek.com", c1[0]);
+            Check("AI URL：候选里包含 /v1/chat/completions" + "（" + Join(c1) + "）", c1.Contains("https://api.deepseek.com/v1/chat/completions"));
+
             cloud.BaseUrl = "https://api.deepseek.com/v1";
-            Eq("AI URL：用户已经带 /v1 时不重复拼",
-                "https://api.deepseek.com/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+            var c2 = AiAdjudicator.BuildUrlCandidates(cloud);
+            Check("AI URL：带 /v1 时候选里包含正确端点" + "（" + Join(c2) + "）", c2.Contains("https://api.deepseek.com/v1/chat/completions"));
+            Check("AI URL：带 /v1 时不会拼出 /v1/v1" + "（" + Join(c2) + "）", !c2.Contains("https://api.deepseek.com/v1/v1/chat/completions"));
+
+            // 智谱 /api/paas/v4 —— 真实踩过的坑：拼成 .../v4/v1/chat/completions 必然 404
+            cloud.BaseUrl = "https://open.bigmodel.cn/api/paas/v4";
+            var c3 = AiAdjudicator.BuildUrlCandidates(cloud);
+            Eq("AI URL：智谱首选是用户原样", "https://open.bigmodel.cn/api/paas/v4", c3[0]);
+            Check("AI URL：智谱候选里包含正确端点" + "（" + Join(c3) + "）", c3.Contains("https://open.bigmodel.cn/api/paas/v4/chat/completions"));
+            Check("AI URL：智谱不会拼出 /v4/v1/" + "（" + Join(c3) + "）", !c3.Contains("https://open.bigmodel.cn/api/paas/v4/v1/chat/completions"));
+
+            // 商汤 /compatible-mode/v2 —— 同一个坑的第二种形态
+            cloud.BaseUrl = "https://api.sensenova.cn/compatible-mode/v2";
+            var c4 = AiAdjudicator.BuildUrlCandidates(cloud);
+            Check("AI URL：商汤候选里包含正确端点" + "（" + Join(c4) + "）", c4.Contains("https://api.sensenova.cn/compatible-mode/v2/chat/completions"));
+            Check("AI URL：商汤不会拼出 /v2/v1/" + "（" + Join(c4) + "）", !c4.Contains("https://api.sensenova.cn/compatible-mode/v2/v1/chat/completions"));
+
+            // 用户直接填完整端点：只有 1 个候选，且原样可用
             cloud.BaseUrl = "https://x/v1/chat/completions";
-            Eq("AI URL：用户填了完整路径就原样用",
-                "https://x/v1/chat/completions", AiAdjudicator.BuildUrl(cloud));
+            var c5 = AiAdjudicator.BuildUrlCandidates(cloud);
+            Eq("AI URL：完整端点只有一个候选", 1, c5.Count);
+            Eq("AI URL：完整端点原样用", "https://x/v1/chat/completions", c5[0]);
+
+            // 空地址不能崩
+            Eq("AI URL：空地址候选为空", 0, AiAdjudicator.BuildUrlCandidates(
+                new AiAdjudicator.Config { Backend = "openai", BaseUrl = "" }).Count);
+            Eq("AI URL：null 地址候选为空", 0, AiAdjudicator.BuildUrlCandidates(
+                new AiAdjudicator.Config { Backend = "openai", BaseUrl = null }).Count);
 
             // ---------- 请求体 ----------
             var bodyLocal = AiAdjudicator.BuildRequestBody(local, "test");
@@ -3060,18 +3095,22 @@ namespace TomatoBiquga
                     p.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
             }
 
-            // 预设的地址要能和我们自己的 URL 拼装对上（否则用户点一下就连不上）
+            // 预设的地址要能真的连上：候选里必须包含"补好最后一段"的那个 URL。
+            // 这条比"预设字段非空"有用得多 —— 它验的是**用户点一下真的能用**。
             foreach (var p in presets)
             {
                 if (p.BaseUrl.Length == 0) continue;
                 var c = new AiAdjudicator.Config { Backend = "openai", BaseUrl = p.BaseUrl, Model = p.Model, ApiKey = "k" };
-                var u = AiAdjudicator.BuildUrl(c);
-                Check("AI 预设：[" + p.Name + "] 地址能拼成正确的请求 URL（" + u + "）",
-                    u.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) &&
-                    u.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
-                // 智谱的 v4 路径不能被我们再拼一个 /v1 上去
-                if (p.Name.StartsWith("智谱", StringComparison.Ordinal))
-                    Check("AI 预设：智谱地址不重复拼 v1（" + u + "）", u.IndexOf("/v1/", StringComparison.Ordinal) < 0);
+                var cands = AiAdjudicator.BuildUrlCandidates(c);
+                bool hasGood = false;
+                foreach (var u in cands)
+                    if (u.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) &&
+                        u.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) hasGood = true;
+                Check("AI 预设：[" + p.Name + "] 候选里有能用的 https 端点（" + Join(cands) + "）", hasGood);
+                // 不能拼出 /v4/v1/ 或 /v2/v1/ 这种（智谱、商汤的真实坑）
+                foreach (var u in cands)
+                    Check("AI 预设：[" + p.Name + "] 不出现 '/v<数字>/v1/' 这种拼错（" + u + "）",
+                        System.Text.RegularExpressions.Regex.IsMatch(u, @"/v\d+/v1/") == false);
             }
 
             // ---------- 本机模型探测：连不上时必须安全返回空 ----------
@@ -3085,6 +3124,17 @@ namespace TomatoBiquga
         {
             foreach (var p in list) if (string.IsNullOrEmpty(p.Note)) return false;
             return true;
+        }
+
+        private static string Join(List<string> list)
+        {
+            var sb = new StringBuilder();
+            foreach (var s in list)
+            {
+                if (sb.Length > 0) sb.Append(" | ");
+                sb.Append(s);
+            }
+            return sb.ToString();
         }
 
         private static bool HasPreset(List<AiAdjudicator.CloudPreset> list, string kw)

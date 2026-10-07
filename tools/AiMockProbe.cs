@@ -53,6 +53,89 @@ internal static class AiMockProbe
         srv.Start();
         Thread.Sleep(300);
 
+        // ------------------------------------------------------------
+        //  路径自适应专项：假服务只认一个正确路径，别的都回 404，
+        //  验证"用户把 base_url 填成各种形状都能自愈"。
+        //  真实世界对应：智谱 /api/paas/v4、商汤 /compatible-mode/v2 都栽在这上面。
+        // ------------------------------------------------------------
+        if (mode == "fallback")
+        {
+            Console.WriteLine("=== 接口路径自适应验证（假服务只认一个路径，其余回 404）===");
+            Console.WriteLine();
+
+            var cases = new List<string[]>();
+            // { 用户填的 base_url（相对路径）, 假服务真正认的路径, 期望候选数 }
+            // 候选数说明：结尾已经是 /v<数字> 时**不再**拼 /v1（否则会成 .../v4/v1/...），
+            // 所以那几种只有 2 个候选。这是有意为之，不是漏了。
+            cases.Add(new[] { "", "/v1/chat/completions", "3" });
+            cases.Add(new[] { "/", "/v1/chat/completions", "3" });
+            cases.Add(new[] { "/v1", "/v1/chat/completions", "2" });
+            cases.Add(new[] { "/api/paas/v4", "/api/paas/v4/chat/completions", "2" });
+            cases.Add(new[] { "/compatible-mode/v2", "/compatible-mode/v2/chat/completions", "2" });
+            cases.Add(new[] { "/v1/chat/completions", "/v1/chat/completions", "1" });
+
+            foreach (var cs in cases)
+            {
+                string rel = cs[0];
+                string goodPath = cs[1];
+                int wantCands = int.Parse(cs[2]);
+
+                int p2 = FreePort();
+                string good = goodPath;
+                string okBody = fakeBody;
+                var s2 = new Thread(() => ServeStrict(p2, good, okBody)) { IsBackground = true };
+                s2.Start();
+                Thread.Sleep(200);
+
+                string label = rel.Length == 0 ? "(只填主机)" : rel;
+                var cf = new AiAdjudicator.Config
+                {
+                    Backend = "openai",
+                    BaseUrl = "http://127.0.0.1:" + p2 + rel,
+                    Model = "mock-model", ApiKey = "sk-mock", TimeoutSeconds = 10,
+                };
+                var cands = AiAdjudicator.BuildUrlCandidates(cf);
+                Chk("自适应 [" + label + "] 候选数应为 " + wantCands + "（实际 " + cands.Count + "）",
+                    cands.Count == wantCands);
+                // 第一个候选必须是"用户填的原样" —— 从官方文档抄来的完整端点不能被改坏
+                Chk("自适应 [" + label + "] 首选是用户原样", cands[0] == cf.BaseUrl.TrimEnd('/'), cands[0]);
+
+                var diffs2 = new List<TypoFinder.Diff>
+                {
+                    new TypoFinder.Diff { Kind = TypoFinder.DiffKind.Replace, Chapter = "c",
+                        Primary = "现", Other = "現", Context = "发【现】" },
+                };
+                var v2 = new AiAdjudicator.VerdictResult[1];
+                var st2 = new AiAdjudicator.SessionStats();
+                var lg = new List<string>();
+                AiAdjudicator.Run(diffs2, v2, cf, m => lg.Add(m), () => false, st2);
+
+                Chk("自适应 [" + label + "] 最终请求成功（" + (st2.Succeeded == 1 ? "通" : st2.LastError) + "）",
+                    st2.Succeeded == 1);
+                Chk("自适应 [" + label + "] 拿到裁决",
+                    v2[0] != null && v2[0].Verdict == AiAdjudicator.Verdict.PrimaryRight);
+                if (wantCands > 1)
+                {
+                    bool adapted = false;
+                    foreach (var m in lg) if (m.IndexOf("自适应成功", StringComparison.Ordinal) >= 0) adapted = true;
+                    Chk("自适应 [" + label + "] 日志里报告了自适应", adapted);
+                }
+            }
+
+            Console.WriteLine();
+            Chk("判断：404 值得换下一个候选", AiAdjudicator.ShouldTryNextUrl("curl 退出码 22：HTTP 404"));
+            Chk("判断：NOT_FOUND 值得换", AiAdjudicator.ShouldTryNextUrl("{\"code\":5,\"message\":\"NOT_FOUND\"}"));
+            Chk("判断：no Route matched 值得换", AiAdjudicator.ShouldTryNextUrl("no Route matched with those values"));
+            // ★ 这几条是重点：鉴权失败绝不能换路径，否则白等还可能触发风控
+            Chk("判断：403 不换（账户权限问题，换路径没用）",
+                !AiAdjudicator.ShouldTryNextUrl("curl 退出码 22：HTTP 403 {\"code\":7,\"message\":\"Forbidden\"}"));
+            Chk("判断：401 不换", !AiAdjudicator.ShouldTryNextUrl("HTTP 401"));
+            Chk("判断：超时不换（换路径也一样慢）", !AiAdjudicator.ShouldTryNextUrl("curl 超时"));
+            Chk("判断：空错误不换", !AiAdjudicator.ShouldTryNextUrl(""));
+
+            return Finish();
+        }
+
         Console.WriteLine("=== AI 裁决端到端验证（假服务：" + mode + "，端口 " + port + "）===");
         Console.WriteLine();
 
@@ -178,6 +261,16 @@ internal static class AiMockProbe
     /// <summary>够用的假服务：读掉请求头与 Content-Length 的 body，然后回一个固定 JSON</summary>
     private static void Serve(int port, string body)
     {
+        ServeStrict(port, null, body);
+    }
+
+    /// <summary>
+    /// 严格版假服务：只有请求路径等于 <paramref name="onlyPath"/> 时才回 200，
+    /// 其余一律 404（模仿"接口路径不对"的真实表现）。
+    /// onlyPath 为 null 时全部放行。
+    /// </summary>
+    private static void ServeStrict(int port, string onlyPath, string body)
+    {
         var listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
         while (true)
@@ -191,6 +284,7 @@ internal static class AiMockProbe
                     var buf = new byte[8192];
                     var sb = new StringBuilder();
                     int contentLength = 0;
+                    string path = "/";
                     while (true)
                     {
                         int n = stream.Read(buf, 0, buf.Length);
@@ -200,12 +294,18 @@ internal static class AiMockProbe
                         int hEnd = head.IndexOf("\r\n\r\n", StringComparison.Ordinal);
                         if (hEnd >= 0)
                         {
-                            foreach (var line in head.Substring(0, hEnd).Split(new[] { "\r\n" }, StringSplitOptions.None))
+                            var lines = head.Substring(0, hEnd).Split(new[] { "\r\n" }, StringSplitOptions.None);
+                            if (lines.Length > 0)
+                            {
+                                // "POST /v1/chat/completions HTTP/1.1"
+                                var parts = lines[0].Split(' ');
+                                if (parts.Length >= 2) path = parts[1];
+                            }
+                            foreach (var line in lines)
                             {
                                 if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                                     int.TryParse(line.Substring(15).Trim(), out contentLength);
                             }
-                            // body 可能还没读完
                             int got = Encoding.UTF8.GetByteCount(head.Substring(hEnd + 4));
                             while (got < contentLength)
                             {
@@ -217,8 +317,12 @@ internal static class AiMockProbe
                         }
                     }
 
-                    var bodyBytes = Encoding.UTF8.GetBytes(body);
-                    var resp = "HTTP/1.1 200 OK\r\n" +
+                    bool ok = onlyPath == null || string.Equals(path, onlyPath, StringComparison.Ordinal);
+                    string payload = ok
+                        ? body
+                        : "{\"error\":{\"code\":5,\"message\":\"NOT_FOUND\",\"details\":[]}}";
+                    var bodyBytes = Encoding.UTF8.GetBytes(payload);
+                    var resp = "HTTP/1.1 " + (ok ? "200 OK" : "404 Not Found") + "\r\n" +
                                "Content-Type: application/json\r\n" +
                                "Content-Length: " + bodyBytes.Length + "\r\n" +
                                "Connection: close\r\n\r\n";
