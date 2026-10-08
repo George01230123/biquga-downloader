@@ -174,6 +174,8 @@ namespace TomatoBiquga
                 TestAiAdjudicator();
                 // 配置项往返
                 TestSettingsRoundTrip(work);
+                // 日志里不许写死总量
+                TestNoHardcodedTotalsInLogs();
             }
             catch (Exception ex)
             {
@@ -3221,6 +3223,80 @@ namespace TomatoBiquga
             Eq("设置夹取：非布尔的布尔值不改变默认", false, c.OutputTraditional);
 
             try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+
+        // ============================================================
+        //  20) 回归守卫：日志里不许出现写死的"总量"
+        // ============================================================
+
+        /// <summary>
+        /// 真实 bug：目录遍历的进度日志曾经写成
+        ///     "目录遍历中：已收录 {0} 章（第 {1} 页，共约 {2} 页待走）"  最后一个参数是 772
+        /// 那个 772 是我测《沧元图》时看到的页数，**顺手写死进了代码**。
+        /// 用户拿它跑章节更多的书就看到"已收录 800 章（共约 772 页待走）"——
+        /// 数字自己打自己，用户合理地来问"你这不对吧"。
+        ///
+        /// 更本质的问题：这个遍历是**从最后一章往回走**的，
+        /// 在走回目录页之前**根本不可能知道总页数**。
+        /// 所以"共约 N 页"这个说法本身就是编的，压根不该出现在日志里。
+        ///
+        /// 这条断言扫源码文本，防止以后又有人把某个实测数字写进提示语。
+        /// </summary>
+        private static void TestNoHardcodedTotalsInLogs()
+        {
+            var root = FindRepoRoot();
+            if (root == null)
+            {
+                Check("日志硬编码守卫：没找到仓库根目录，跳过", true);
+                return;
+            }
+
+            var bad = new List<string>();
+            var files = Directory.GetFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories);
+            foreach (var f in files)
+            {
+                string[] lines;
+                try { lines = File.ReadAllLines(f, Encoding.UTF8); }
+                catch { continue; }
+
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    var line = lines[i];
+                    var t = line.TrimStart();
+                    // 注释行不算 —— 我们正是在注释里解释这个 bug 的
+                    if (t.StartsWith("//", StringComparison.Ordinal) || t.StartsWith("*", StringComparison.Ordinal))
+                        continue;
+                    if (line.IndexOf("共约", StringComparison.Ordinal) >= 0 ||
+                        line.IndexOf("页待走", StringComparison.Ordinal) >= 0)
+                        bad.Add(Path.GetFileName(f) + ":" + (i + 1) + " " + t);
+                }
+            }
+
+            Check("日志硬编码守卫：代码里没有写死的总量（" +
+                  (bad.Count == 0 ? "干净" : string.Join(" ｜ ", bad.ToArray())) + "）",
+                  bad.Count == 0);
+
+            // 顺带确认新日志报的是"真实测得"的东西
+            var sitePath = Path.Combine(root, "src", "Sites", "BiqugaSite.cs");
+            if (File.Exists(sitePath))
+            {
+                var src = File.ReadAllText(sitePath, Encoding.UTF8);
+                Contains("日志守卫：进度日志改报实际走过的页数", src, "走过 {1} 页");
+            }
+        }
+
+        /// <summary>从程序所在目录往上找仓库根（有 src\Sites 和 tests 的那一级）</summary>
+        private static string FindRepoRoot()
+        {
+            var d = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            for (int i = 0; i < 8 && d != null; i++)
+            {
+                if (Directory.Exists(Path.Combine(d.FullName, "src", "Sites")) &&
+                    Directory.Exists(Path.Combine(d.FullName, "tests")))
+                    return d.FullName;
+                d = d.Parent;
+            }
+            return null;
         }
 
         // ============================================================

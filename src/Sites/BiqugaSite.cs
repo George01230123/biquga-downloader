@@ -177,10 +177,11 @@ namespace TomatoBiquga
         ///
         /// 站点的“下一章”链接(var kkehvov)是不可靠的：同一页面多次请求会给出不同的 next
         /// （实测 10032109 的第 3 页，next 有时指第 4 页、有时指第 1 页），
-        /// 顺着 next 走整本会成环、漏章（1600 页只凑出 495/772 章）。
+        /// 顺着 next 走整本会成环、漏章（实测：只凑出 495 章，而实际有 772 章）。
         ///
-        /// 而“上一页”链接(var uiiekp0do)完全可靠：从最后一章一路 prev 走回目录页，
-        /// 恰好覆盖 772 个页面（含章内分页），一章不漏。
+        /// 而“上一页”链接(var uiiekp0do)完全可靠：从最后一章一路 prev 走回目录页。
+        /// 实测《沧元图》走完是 772 页 / 774 章（页数含章内分页，所以比章数略少）。
+        /// 注意**页数因书而异**，不要在代码里假设某个固定值 —— 这里写出来只是留个量级参考。
         /// 章节 id 单调递增，所以最后按 id 升序排就是正确阅读顺序。
         /// </summary>
         private List<ChapterInfo> CrawlChapters(string dir, string firstCid, Action<string> log)
@@ -220,6 +221,9 @@ namespace TomatoBiquga
 
             int sinceCheckpoint = 0;
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            // 进度日志单独计时：sinceCheckpoint 会被落盘逻辑提前清零，不能拿来算速度
+            var logSw = System.Diagnostics.Stopwatch.StartNew();
+            int lastLogPages = 0;
 
             while (!string.IsNullOrEmpty(key) && pages < 20000)
             {
@@ -259,7 +263,26 @@ namespace TomatoBiquga
                 key = KeyOf(pk.Item1, pk.Item2);
 
                 if (log != null && pages % 50 == 0)
-                    log(string.Format("  目录遍历中：已收录 {0} 章（第 {1} 页，共约 {2} 页待走）", byCid.Count, pages, 772));
+                {
+                    // ★ 不要在这里写"共约 X 页"。这个遍历是**从最后一章往回走**的，
+                    //   在走回目录页之前**根本不可能知道总共有多少页**。
+                    //   上一版这里写死了 772（我测《沧元图》时看到的页数），
+                    //   结果别的书跑起来就是"已收录 800 章（共约 772 页待走）"——
+                    //   数字自己打自己，用户当然会怀疑。
+                    //   现在如实报三件**真实测得**的事：收录了多少章、实际走过多少页、
+                    //   最近这段的速度。总页数等走到目录页那一刻才知道。
+                    //
+                    //   速度用**本次日志间隔**单独计时，不能复用 sinceCheckpoint ——
+                    //   那个变量会被"页数或 45 秒"的落盘逻辑提前清零，算出来是错的。
+                    double logMins = logSw.Elapsed.TotalMinutes;
+                    string speed = "";
+                    if (logMins >= 0.5)
+                        speed = string.Format("，约 {0:F0} 页/分", (pages - lastLogPages) / logMins);
+                    log(string.Format("  目录遍历中：已收录 {0} 章（走过 {1} 页{2}）",
+                        byCid.Count, pages, speed));
+                    logSw.Restart();
+                    lastLogPages = pages;
+                }
                 if (pages % 3 == 0) Http.Polite();
 
                 // 定期落一次断点。间隔按"页数 + 时间"双条件：
