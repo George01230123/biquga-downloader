@@ -23,12 +23,14 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己，用户看不下去）。
+// 1.4.0：下载并发化（实测 5.57×，产物逐字节一致）；正文清洗不再误删正文
+//        （原来 15 条正常语料里 11 条被破坏）；移动版广告与反爬水印清理；
+//        清洗咽喉点前移（导出 EPUB/Markdown 不再带广告）；
+//        EPUB 的 mimetype 改成 stored（合规）；错字检测加对照源探活；
+//        `--selftest` 接上（用户手里那个 exe 自己就能跑测试）。
+// 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
-//        只把双源比对里"两边写法不同、不知道哪个对"的高可疑差异交给大模型，
-//        只发差异点前后十几个字 —— 成本与隐私暴露面都压到最小。
-// 1.2.1：修掉"按钮文字被压成省略号"（MakeButton 写死宽度 + AutoEllipsis）；
-//        标题版本号改成从程序集读（原来硬编码 v1.0.5，发到 1.2.0 还显示 1.0.5）。
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
-[assembly: AssemblyInformationalVersion("1.3.1")]
+// 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyInformationalVersion("1.4.0")]

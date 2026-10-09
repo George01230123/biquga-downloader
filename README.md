@@ -60,7 +60,7 @@
 | 载入目录 | 优先用本地缓存，缓存超过 72 小时会重新遍历 |
 | 刷新目录 | 忽略缓存，强制重新遍历站点。**有断点时**会问你是「接着上次走」还是「从头重来」 |
 | ☑ 离线模式 | 载入目录时把正文一起抓下来，之后下载**不再联网**（强烈建议勾上） |
-| 下载全部 / 下载选中 | 每 20 章落一次盘，可随时取消 |
+| 下载全部 / 下载选中 | **正文并发抓取**（默认 6~8 线程）、落盘仍严格按目录顺序；每 20 章落一次盘，可随时取消 |
 | **更新新章节** | 站点更新了只下新章节（老正文一字不动）|
 | **导出 EPUB** | 把已下载的正文导出成 EPUB，手机阅读器直接打开（不联网，**自动带封面**） |
 | **导出 Markdown** | 导出带 YAML 头 + 目录锚点的 md（pandoc / 笔记软件 / 静态站点都能用） |
@@ -165,8 +165,8 @@ build.bat
 | `_selftest.exe` | 命令行自测：`_selftest.exe dl /69_69707 6`、`biquga`、`fanqie`、`write` |
 | `_edgetest.exe` | 边界测试（含离屏真下载：把窗口移到屏幕外，跑一遍和界面完全相同的下载路径） |
 | `_layoutprobe.exe` | 界面布局体检：越界/重叠逐条报出来，`--shots` 还能出截图 |
-| `_offlinetests.exe` | **1014 项离线单测，不联网**（CI 跑的就是它） |
-| `_e2e.exe` | **端到端集成校验，不联网**：造一整本书（分卷 + 封面 + 繁体）→ 导出 EPUB/Markdown → 把产物当外来文件重新打开验（mimetype 顺序、每个 XML 用 `XmlDocument` 真解析、封面字节在位、目录嵌套精确计数） |
+| `_offlinetests.exe` | **1092 项离线单测，不联网**（CI 跑的就是它） |
+| `_e2e.exe` | **端到端集成校验，不联网**：造一整本书（分卷 + 封面 + 繁体）→ 导出 EPUB/Markdown → 把产物当外来文件重新打开验（mimetype **顺序与压缩方法**、每个 XML 用 `XmlDocument` 真解析、封面字节在位、目录嵌套精确计数） |
 | `_textfit.exe` | **界面文字体检，不联网**：逐个按钮用 `TextRenderer` 量文字宽度，确认按钮放得下自己的文字（防「搜…」这类省略号） |
 | `_aimock.exe` | **AI 裁决端到端，不联网**：在本地起一个**假**的 OpenAI/Ollama 服务，让真实的 `AiAdjudicator` 走完整 HTTP。模式：`openai` / `ollama` / `err`（模型名写错的降级）/ `fallback`（6 种 base_url 形状的路径自适应） |
 | `_liveprobe.exe` | **联网实测探针**（需要网络，不进离线门禁）：`cover` / `fanqie` / `export` / `typo` / `typooffline` / `probe`，验证真实站点的字段名、防盗链、以及"请求真的发出去了" |
@@ -181,6 +181,17 @@ dotnet build build/NovelDownloader.csproj -c Release
 dotnet build build/NovelDownloader.Tests.csproj -c Release
 ./dist/_offlinetests.exe        # 退出码 0 = 全部通过
 ```
+
+**方式 C：直接问用户手里那个 exe**（v1.4.0 起）
+
+```bash
+小说下载器.exe --selftest        # 退出码 0 = 全部通过，不开窗
+```
+
+测试代码编进了主程序，所以「CI 跑通的那个二进制」和「用户手里那个二进制」
+**是同一个文件**。让用户跑这一条命令把输出贴回来，就能确认他那份到底有没有问题 ——
+不用再另外发 `_offlinetests.exe`，也不用怀疑"是不是你编译的版本不一样"。
+（代价：exe 从 255 KB 涨到约 365 KB。我认为这个交换值得。）
 
 CI（`.github/workflows/ci.yml`）走的就是方式 B，离线单测失败会直接红。
 
