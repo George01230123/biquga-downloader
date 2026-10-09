@@ -177,6 +177,11 @@ namespace TomatoBiquga
             sb.Append(t).Append('\n');
             sb.Append(new string('-', Math.Min(24, Math.Max(6, t.Length)))).Append('\n').Append('\n');
             if (!string.IsNullOrEmpty(body)) sb.Append(TextCleaner.CleanBody(body)).Append('\n');
+            // ↑ 这里保留一次 CleanBody 是**故意的**：本函数不只被下载路径调用，
+            //   「缺章补齐」「从 txt 反解再重写」等路径也会直接传正文进来。
+            //   CleanBody 对已清洗的文本是幂等的（有断言守着），所以重复调用无害，
+            //   但能保证"任何入口进来的正文都被清洗过"。
+            //   真正的"单一咽喉点"在 DownloadRunner.Commit —— 那边保证进内存就是干净的。
             return sb.ToString();
         }
 

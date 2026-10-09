@@ -1207,6 +1207,18 @@ namespace TomatoBiquga
             }
         }
 
+        /// <summary>从「[重试] 完成 第3章 标题3（194 字）」里取出「第3章 标题3」</summary>
+        private static string TitleOfLog(string line)
+        {
+            int a = line.IndexOf("完成 ", StringComparison.Ordinal);
+            if (a < 0) return line;
+            a += 3;                                   // 跳过"完成 "
+            int b = line.LastIndexOf('（');            // 全角括号（日志里就是全角）
+            if (b <= a) b = line.LastIndexOf('(');
+            if (b <= a) return line.Substring(a).Trim();
+            return line.Substring(a, b - a).Trim();
+        }
+
         private static void TestParallelDownload(string work)
         {
             var dir = Path.Combine(work, "parallel");
@@ -1267,11 +1279,20 @@ namespace TomatoBiquga
             Eq("并发：正文部分与串行逐字一致", sBody, pBody);
 
             // 日志里的"完成"顺序也必须是目录顺序（否则用户看到的进度是乱的）
+            //
+            // ★ 只比**章节顺序**，不比字数：这条断言的目的是"顺序对不对"，
+            //   而字数会随清洗规则变化（清洗挪到"进内存"那一刻之后，
+            //   末尾换行被 TrimEnd 掉，于是 195 → 194 字）。
+            //   把字数一起比进来，会让"改清洗规则"莫名其妙地弄红一条与顺序无关的断言。
             var sOrder = new List<string>();
-            foreach (var l in serialLog) if (l.Contains("完成 ")) sOrder.Add(l);
+            foreach (var l in serialLog) if (l.Contains("完成 ")) sOrder.Add(TitleOfLog(l));
             var pOrder = new List<string>();
-            foreach (var l in parLog) if (l.Contains("完成 ")) pOrder.Add(l);
+            foreach (var l in parLog) if (l.Contains("完成 ")) pOrder.Add(TitleOfLog(l));
             Eq("并发：完成日志的顺序与串行一致", string.Join("|", sOrder), string.Join("|", pOrder));
+            Eq("并发：完成顺序就是目录顺序",
+                "第1章 标题1|第2章 标题2|第3章 标题3|第4章 标题4|第6章 标题6|第7章 标题7|第8章 标题8|第10章 标题10|第11章 标题11|第12章 标题12",
+                string.Join("|", pOrder));
+            Eq("并发：完成条数与串行一致", sOrder.Count, pOrder.Count);
 
             Check("并发：失败章节记了原因", par.FailReasons.ContainsKey("c5"));
             Check("并发：缺失报告里写了失败章",

@@ -389,10 +389,21 @@ namespace TomatoBiquga
             else
             {
                 Ok++;
-                c.Text = text;
+                // ★ 清洗在**这里**做（"进内存"的那一刻），而不是在写 txt 那一步。
+                //
+                //   原来只清洗 txt：ChapterIndex.BuildChapterBlock → TextCleaner.CleanBody，
+                //   而 EPUB / Markdown 直接用 c.Text。于是同一本书会出现
+                //   **txt 干净、epub 里广告还在** —— 而且这个 bug 只在
+                //   "下载完当次直接导出"时暴露（关掉程序再从 txt 反解就正常了），
+                //   所以一直没被发现。
+                //
+                //   现在 c.Text 本身就是干净的，txt / EPUB / Markdown / 字数统计 /
+                //   错字检测**全部看到同一份正文**。这就是"单一咽喉点"：
+                //   将来改清洗规则只用改一处，不会出现两个出口不一致。
+                c.Text = TextCleaner.CleanBody(text);
                 // 章节块统一由 ChapterIndex 生成：里面会先写一行锚点 <!--c:id-->，
                 // 「缺章补齐」和「章节级续传」靠它定位到具体某一章（见 ChapterIndex.cs）
-                var block = ChapterIndex.BuildChapterBlock(c.Id, c.Title, text);
+                var block = ChapterIndex.BuildChapterBlock(c.Id, c.Title, c.Text);
                 if (_replaceMissing)
                 {
                     // 插入模式：直接落到文件里的正确位置（不是简单追加）

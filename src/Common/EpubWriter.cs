@@ -120,8 +120,247 @@ namespace TomatoBiquga
                     CompressionLevel.Optimal);
             }
 
+            // ★ mimetype 必须是 **stored（不压缩）**（OCF 规范；epubcheck 会因此报错，
+            //   个别严格的阅读器会判成损坏文件）。
+            //
+            //   上面虽然写了 CompressionLevel.NoCompression，但 **.NET Framework 的
+            //   ZipArchive 会忽略它** —— 实测导出的 epub 里第一个条目 method=8 (deflate)。
+            //   这是框架行为不是笔误（我单独做过最小复现：只写 mimetype 的 zip，仍然是 8）。
+            //   所以这里在收尾时手工把第一个条目重写成 stored。
+            ForceStoredFirstEntry(tmp);
+
             if (File.Exists(path)) File.Delete(path);
             File.Move(tmp, path);
+        }
+
+        /// <summary>
+        /// 把 ZIP 的**第一个条目**（本项目的 epub 里就是 mimetype）改写成 stored（不压缩）。
+        ///
+        /// 为什么要手工做：.NET Framework 的 ZipArchive 忽略 NoCompression（见上）。
+        /// 做法：解出原始字节 → 用 method=0 重建第一段 → 后面所有偏移整体平移 →
+        ///       同步修改中央目录里每个条目的 offset、以及第一个条目的 method/size →
+        ///       最后改 EOCD 里的"中央目录起始偏移"。
+        ///
+        /// 安全性上刻意做了几件事：
+        ///   · 只认第一个条目叫 `mimetype`（名字/内容不符就原样退出，绝不动别的 zip）；
+        ///   · 已经是 stored 就直接返回；
+        ///   · 改完**必须能重新被 ZipFile 打开**，打不开就放弃修改（宁可 epubcheck 报警，
+        ///     也不能交出一个损坏的文件）；
+        ///   · 任何异常都吞掉并保留原文件 —— 这是个"锦上添花"的合规修复，
+        ///     不该让导出失败。
+        /// </summary>
+        private static void ForceStoredFirstEntry(string zipPath)
+        {
+            try
+            {
+                var b = File.ReadAllBytes(zipPath);
+                if (b.Length < 30) return;
+                if (b[0] != 'P' || b[1] != 'K' || b[2] != 3 || b[3] != 4) { return; }
+
+                int method = b[8] | (b[9] << 8);
+                if (method == 0) return;                                  // 已经是 stored
+
+                int nameLen = b[26] | (b[27] << 8);
+                int extraLen = b[28] | (b[29] << 8);
+                if (30 + nameLen > b.Length) return;
+                var name = Encoding.ASCII.GetString(b, 30, nameLen);
+                if (name != "mimetype") return;                           // 只动 mimetype
+
+                long compSize = BitConverter.ToUInt32(b, 18);
+                long uncompSize = BitConverter.ToUInt32(b, 22);
+                int dataStart = 30 + nameLen + extraLen;
+                if (compSize <= 0 || dataStart + compSize > b.Length) return;
+
+                // 解出原始内容（mimetype 内容固定，很小）
+                byte[] raw = Inflate(b, dataStart, (int)compSize);
+                if (raw == null || raw.Length == 0) return;
+                if (raw.Length != uncompSize) { /* 大小不符也不致命，继续用 raw.Length */ }
+
+                // 新前缀：本地头（method=0、size=raw.Length）+ 名字 + 空 extra + 原始数据
+                var head = new byte[30];
+                head[0] = 0x50; head[1] = 0x4B; head[2] = 3; head[3] = 4;   // PK\3\4
+                head[4] = b[4]; head[5] = b[5];                            // version needed
+                head[6] = b[6]; head[7] = b[7];                            // flags
+                head[8] = 0; head[9] = 0;                                  // method = stored
+                // 时间/日期沿用原来的
+                for (int i = 10; i < 14; i++) head[i] = b[i];
+                PutU32(head, 14, Crc32(raw));                              // crc32
+                PutU32(head, 18, (uint)raw.Length);                        // comp size
+                PutU32(head, 22, (uint)raw.Length);                        // uncomp size
+                head[26] = (byte)(nameLen & 0xFF); head[27] = (byte)(nameLen >> 8);
+                head[28] = 0; head[29] = 0;                                // extra len = 0
+
+                var nameBytes = Encoding.ASCII.GetBytes("mimetype");
+                var newFirst = new byte[head.Length + nameBytes.Length + raw.Length];
+                Buffer.BlockCopy(head, 0, newFirst, 0, head.Length);
+                Buffer.BlockCopy(nameBytes, 0, newFirst, head.Length, nameBytes.Length);
+                Buffer.BlockCopy(raw, 0, newFirst, head.Length + nameBytes.Length, raw.Length);
+
+                int oldFirstLen = dataStart + (int)compSize;
+                int delta = newFirst.Length - oldFirstLen;                 // 后续内容要平移这么多
+
+                // 拼出新文件
+                var result = new byte[b.Length + delta];
+                Buffer.BlockCopy(newFirst, 0, result, 0, newFirst.Length);
+                Buffer.BlockCopy(b, oldFirstLen, result, newFirst.Length, b.Length - oldFirstLen);
+
+                // 找到 EOCD，把中央目录整体重定位。
+                //
+                // ★ 关键：**EOCD 自己也搬家了**。
+                //   EOCD 在第一个条目后面，所以它跟着 delta 一起平移；
+                //   而它内部记的"CD 起始偏移"是**绝对偏移**，也必须一起 +delta。
+                //   我第一版忘了修这个字段，于是拿着旧的 CD 偏移去新数组里找中央目录头，
+                //   落在别处、签名对不上，白白放弃修复（文件保持 deflate）。
+                //
+                //   顺序很重要：先把 CD 偏移改成新值，再按新值去走中央目录。
+                int eocd = FindEocd(result);
+                if (eocd < 0) { RestoreOriginal(zipPath, b); return; }
+                long cdAt = BitConverter.ToUInt32(result, eocd + 16) + delta;
+                if (cdAt < 0 || cdAt + 46 > eocd) { RestoreOriginal(zipPath, b); return; }
+                PutU32(result, eocd + 16, (uint)cdAt);
+                if (!PatchCentralDirectory(result, eocd, (int)cdAt, delta)) { RestoreOriginal(zipPath, b); return; }
+
+                // ★ 改完必须还能被正常打开，否则放弃（宁可不合规，也不能交损坏文件）
+                File.WriteAllBytes(zipPath, result);
+                try
+                {
+                    using (var z = ZipFile.OpenRead(zipPath))
+                    {
+                        if (z.Entries.Count == 0 || z.Entries[0].FullName != "mimetype")
+                        { RestoreOriginal(zipPath, b); return; }            // 回滚
+                        using (var s = z.Entries[0].Open())
+                        {
+                            var buf = new byte[64];
+                            int n = s.Read(buf, 0, buf.Length);
+                            var ok = n > 0 && Encoding.ASCII.GetString(buf, 0, n).StartsWith("application/epub+zip",
+                                StringComparison.Ordinal);
+                            if (!ok) File.WriteAllBytes(zipPath, b);            // 回滚
+                        }
+                    }
+                }
+                catch (Exception ex) { try { File.WriteAllBytes(zipPath, b); } catch { } }
+            }
+            catch (Exception ex3) { }
+        }
+
+        /// <summary>把文件恢复成原始字节（改动不可信时的回滚路径）</summary>
+        private static void RestoreOriginal(string zipPath, byte[] original)
+        {
+            try { File.WriteAllBytes(zipPath, original); } catch { }
+        }
+
+        private static void PutU32(byte[] b, int at, uint v)
+        {
+            b[at] = (byte)(v & 0xFF);
+            b[at + 1] = (byte)((v >> 8) & 0xFF);
+            b[at + 2] = (byte)((v >> 16) & 0xFF);
+            b[at + 3] = (byte)((v >> 24) & 0xFF);
+        }
+
+        private static int FindEocd(byte[] b)
+        {
+            for (int i = b.Length - 22; i >= 0 && i > b.Length - 22 - 65536; i--)
+                if (b[i] == 0x50 && b[i + 1] == 0x4B && b[i + 2] == 5 && b[i + 3] == 6) return i;
+            return -1;
+        }
+
+        /// <summary>修中央目录里每个条目的本地头偏移；第一个条目（mimetype）另把 method/size 改成 stored</summary>
+        /// <summary>
+        /// 走一遍中央目录：把每个条目的"本地头偏移"平移 delta；
+        /// 第一个条目（mimetype）另外把压缩方法改成 stored。
+        /// <paramref name="cdAt"/> 是**已经平移好**的中央目录起始偏移。
+        /// </summary>
+        private static bool PatchCentralDirectory(byte[] b, int eocd, int cdAt, int delta)
+        {
+            int count = b[eocd + 10] | (b[eocd + 11] << 8);
+            int off = cdAt;
+            for (int i = 0; i < count; i++)
+            {
+                // 边界检查必须做全：读条目长度字段前确认 46 字节够，
+                // 算完条目总长还要确认没越过 EOCD —— 否则越界会踩坏 EOCD 记录，
+                // ZipFile 复读时报"不支持拆分或跨区的存档"。
+                if (off < 0 || off + 46 > eocd) return false;
+                if (!(b[off] == 0x50 && b[off + 1] == 0x4B && b[off + 2] == 1 && b[off + 3] == 2)) return false;
+
+                int nameLen = b[off + 28] | (b[off + 29] << 8);
+                int extraLen = b[off + 30] | (b[off + 31] << 8);
+                int cmtLen = b[off + 32] | (b[off + 33] << 8);
+                int entryLen = 46 + nameLen + extraLen + cmtLen;
+                if (entryLen <= 46 || off + entryLen > eocd) return false;
+
+                if (i == 0)
+                {
+                    // mimetype：压缩方法改 stored，两个 size 都改成**未压缩**长度
+                    // （未压缩长度在中央目录的 +24；+20 是压缩长度）
+                    uint rawLen = BitConverter.ToUInt32(b, off + 24);
+                    b[off + 10] = 0; b[off + 11] = 0;                 // method = 0 (stored)
+                    PutU32(b, off + 20, rawLen);
+                    PutU32(b, off + 24, rawLen);
+                }
+                else
+                {
+                    // 第一个条目之后的内容都整体平移了 delta，本地头偏移要跟着改
+                    uint local = BitConverter.ToUInt32(b, off + 42);
+                    PutU32(b, off + 42, (uint)(local + delta));
+                }
+                off += entryLen;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// 解出第一段的数据。
+        ///
+        /// ★ 两种 deflate 包装都要试：
+        ///   · **raw deflate**（无头）—— .NET 的 ZipArchive 用的是这一种；
+        ///   · **zlib 包装**（2 字节头）—— 有些 zip 实现会带。
+        /// 我第一版只按 zlib 写（跳过 2 字节），结果对自家产物直接解压失败 ——
+        /// ZipArchive 写的是 raw deflate，跳 2 字节就把流读坏了。
+        /// 现在先按 raw 试，失败再按 zlib 试。
+        /// </summary>
+        private static byte[] Inflate(byte[] b, int start, int len)
+        {
+            var raw = InflateAt(b, start, len);
+            if (raw != null) return raw;
+            return InflateAt(b, start + 2, len - 2);
+        }
+
+        private static byte[] InflateAt(byte[] b, int start, int len)
+        {
+            if (len <= 0 || start < 0 || start + len > b.Length) return null;
+            try
+            {
+                using (var ms = new MemoryStream(b, start, len))
+                using (var ds = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionMode.Decompress))
+                using (var outMs = new MemoryStream())
+                {
+                    var buf = new byte[4096];
+                    int n;
+                    while ((n = ds.Read(buf, 0, buf.Length)) > 0) outMs.Write(buf, 0, n);
+                    var r = outMs.ToArray();
+                    return r.Length > 0 ? r : null;
+                }
+            }
+            catch { return null; }
+        }
+
+        private static uint[] _crcTable;
+
+        private static uint Crc32(byte[] data)
+        {
+            if (_crcTable == null)
+            {
+                _crcTable = new uint[256];
+                for (uint i = 0; i < 256; i++)
+                {
+                    uint c = i;
+                    for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                    _crcTable[i] = c;
+                }
+            }
+            uint crc = 0xFFFFFFFFu;
+            foreach (var by in data) crc = _crcTable[(crc ^ by) & 0xFF] ^ (crc >> 8);
+            return crc ^ 0xFFFFFFFFu;
         }
 
         /// <summary>EPUB 里章节标题用普通文本即可（在 XHTML 里再转义）</summary>

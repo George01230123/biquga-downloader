@@ -35,6 +35,37 @@ internal static class E2E
         Fails.Add(line);
     }
 
+    /// <summary>ZIP 第一个条目的压缩方法（0=stored，8=deflate）。直接读字节，不靠库。</summary>
+    private static int FirstEntryMethod(string zipPath)
+    {
+        try
+        {
+            var b = File.ReadAllBytes(zipPath);
+            if (b.Length < 10 || b[0] != 'P' || b[1] != 'K' || b[2] != 3 || b[3] != 4) return -1;
+            return b[8] | (b[9] << 8);
+        }
+        catch { return -1; }
+    }
+
+    private static bool FirstEntryIsStored(string zipPath)
+    {
+        return FirstEntryMethod(zipPath) == 0;
+    }
+
+    /// <summary>ZIP 第一个条目的文件名（用来确认"第一个就是 mimetype"）</summary>
+    private static string FirstEntryName(string zipPath)
+    {
+        try
+        {
+            var b = File.ReadAllBytes(zipPath);
+            if (b.Length < 30) return "";
+            int nameLen = b[26] | (b[27] << 8);
+            if (30 + nameLen > b.Length) return "";
+            return Encoding.ASCII.GetString(b, 30, nameLen);
+        }
+        catch { return ""; }
+    }
+
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
@@ -213,6 +244,14 @@ internal static class E2E
 
             var mt = ReadEntry(zip, "mimetype");
             Check("EPUB：mimetype 内容正确", mt == "application/epub+zip", mt);
+
+            // ★ mimetype 必须是 **stored（不压缩）** —— OCF 规范要求。
+            //   这条断言以前没有，所以"用 deflate 压缩 mimetype"一直绿着：
+            //   原来的断言只查了"是不是第一个"和"内容对不对"，漏了压缩方法。
+            //   而 .NET Framework 的 ZipArchive **会忽略 CompressionLevel.NoCompression**，
+            //   所以这不是笔误、是框架行为 —— 只能靠断言守住。
+            Check("EPUB：mimetype 是 stored 不压缩（规范要求）", FirstEntryIsStored(epubPath),
+                "压缩方法=" + FirstEntryMethod(epubPath) + "（0=stored 合规，8=deflate 违规）");
 
             // 封面必须真的在包里，且字节与源文件一致
             var img = zip.GetEntry("OEBPS/images/cover.png");
