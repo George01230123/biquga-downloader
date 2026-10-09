@@ -1105,6 +1105,24 @@ namespace TomatoBiquga
         private string _resumeBookDir;
         private DateTime _dlStart;
 
+        /// <summary>
+        /// 最近若干章完成的时刻，用来算**实时速率**。
+        ///
+        /// 为什么不直接用"已用时间 / 已完成章数"：那是全程均值 ——
+        /// 站点中途限速（或恢复）时它对当前快慢毫无反应，
+        /// 而用户对"现在快不快"的感知比"平均下来多少"直接得多。
+        /// 用最近 20 章的滑动窗口，限速一发生数字马上就掉下来。
+        /// </summary>
+        private readonly Queue<DateTime> _dlRecent = new Queue<DateTime>();
+        private const int DlRateWindow = 20;
+
+        /// <summary>
+        /// 本次下载实际用的并发数（显示在状态栏）。
+        /// 为什么要显示：并发数藏在 settings.ini 和 站点配置.ini **两个地方**，
+        /// 用户改完根本不知道到底生效了几路 —— 只能靠猜。
+        /// </summary>
+        private int _dlWorkersShown;
+
         /// <summary>把时长格式化成 3分20秒 这样的形式</summary>
         private static string Fmt(TimeSpan t)
         {
@@ -1513,17 +1531,16 @@ namespace TomatoBiquga
                 RootDir = root,
                 Log = Log,
                 RetryPasses = _settings.RetryPasses,
-                Workers = DownloadWorkersFor(site),
+                Workers = _dlWorkersShown = DownloadWorkersFor(site),
                 OutputEncoding = CurrentFileEncoding(),
                 OutputTraditional = _settings.OutputTraditional,
                 IsCanceled = () => _cancel,
                 OnProgress = (done, total) =>
                 {
                         // 记录开始时间用于估算剩余时间
-                        if (done == 0) _dlStart = DateTime.Now;
+                        if (done == 0) { _dlStart = DateTime.Now; _dlRecent.Clear(); }
                         UiInvoke(() =>
-                        {
-                            progress.Minimum = 0;
+                        {                            progress.Minimum = 0;
                             progress.Maximum = total;
                             progress.Value = Math.Min(done, total);
                             if (done == 0 || _dlStart == default(DateTime))
@@ -1531,7 +1548,24 @@ namespace TomatoBiquga
                                 lblStatus.Text = string.Format("开始下载 0/{0} 章…", total);
                                 return;
                             }
+
                             var used = DateTime.Now - _dlStart;
+
+                            // 实时速率：最近 DlRateWindow 章的滑动窗口
+                            _dlRecent.Enqueue(DateTime.Now);
+                            while (_dlRecent.Count > DlRateWindow) _dlRecent.Dequeue();
+                            string rate = "";
+                            if (_dlRecent.Count >= 3)
+                            {
+                                var span = (DateTime.Now - _dlRecent.Peek()).TotalSeconds;
+                                if (span > 0.5)
+                                {
+                                    double perSec = (_dlRecent.Count - 1) / span;
+                                    rate = string.Format("，当前 {0:F2} 章/秒", perSec);
+                                }
+                            }
+
+                            // ETA 仍用全程均值：它更稳，不会因为刚下的几章快慢而乱跳
                             string eta = "";
                             if (done > 0 && done < total)
                             {
@@ -1539,8 +1573,8 @@ namespace TomatoBiquga
                                 var left = TimeSpan.FromSeconds(per * (total - done));
                                 eta = string.Format("，预计还需 {0}", Fmt(left));
                             }
-                            lblStatus.Text = string.Format("下载中 {0}/{1} 章　已用 {2}{3}　（每章约 {4:F1} 秒）",
-                                done, total, Fmt(used), eta, done > 0 ? used.TotalSeconds / done : 0);
+                            lblStatus.Text = string.Format("下载中 {0}/{1} 章　已用 {2}{3}{4}　（并发 {5}）",
+                                done, total, Fmt(used), rate, eta, _dlWorkersShown);
                         });
                 },
             };
@@ -2847,6 +2881,34 @@ namespace TomatoBiquga
             var pick = PickTypoSource(options);
             if (pick < 0 || pick >= keys.Count) return;
             var otherKey = keys[pick];
+            var otherName = otherKey == "biquga-m" ? "笔趣阁（移动版·快）" : "笔趣阁（PC版·慢）";
+
+            // ★ 先探一下对照源可不可用。
+            //   没有这一步的话，源挂掉时是**每章都"抓取失败→跳过"**，
+            //   用户要等跑满 N 章之后才从报告里看出来"比对 10 章、全跳过" ——
+            //   白等一场，而且提示很含糊（"对照源可能抓不到内容"）。
+            //   探活只发 1 个请求，成本可以忽略。
+            if (!SuppressDialogs)
+            {
+                var probeSite = MakeSite(otherKey) as IProbeable;
+                if (probeSite != null)
+                {
+                    Log("先探一下对照源「" + otherName + "」是否可用…");
+                    string why = null;
+                    try { why = probeSite.Probe(); }
+                    catch (Exception ex) { why = ex.Message; }
+                    if (why != null)
+                    {
+                        Log("对照源不可用，已中止：" + why);
+                        MessageBox.Show(this,
+                            "对照源「" + otherName + "」当前不可用：\n\n" + why +
+                            "\n\n换个源再试（下拉框里换一个站点重跑即可）。",
+                            "检测错字", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    Log("对照源可用，开始比对。");
+                }
+            }
 
             string nStr = PromptTypoCount();
             int limit;
@@ -2854,14 +2916,14 @@ namespace TomatoBiquga
             if (limit > book.Chapters.Count) limit = book.Chapters.Count;
 
             Log(string.Format("开始错字检测：用「{0}」重新抓 {1} 章与本地正文逐字比对…",
-                otherKey == "biquga-m" ? "笔趣阁移动版" : "笔趣阁PC版", limit));
+                otherName, limit));
 
             RunBackground("错字检测中…", () =>
             {
                 var result = new TypoFinder.Result
                 {
                     Title = book.Title,
-                    OtherSource = otherKey == "biquga-m" ? "笔趣阁（移动版·快）" : "笔趣阁（PC版·慢）",
+                    OtherSource = otherName,
                 };
 
                 ISite other = MakeSite(otherKey);
@@ -2871,11 +2933,14 @@ namespace TomatoBiquga
                 if (bp != null) bp.CrawlWorkers = _settings.BiqugaPcWorkers;
 
                 int n = 0;
+                int consecutiveEmpty = 0;      // 连续多少章拿不到内容
                 foreach (var c in book.Chapters)
                 {
                     if (c == null || c.IsVolume || string.IsNullOrEmpty(c.Id)) continue;
                     if (n >= limit) break;
                     n++;
+
+                    if (_cancel) { Log("已取消错字检测。"); break; }
 
                     string text = null;
                     try { text = other.LoadChapter(book, c, null); }
@@ -2885,9 +2950,22 @@ namespace TomatoBiquga
                     if (string.IsNullOrEmpty(text))
                     {
                         result.SkippedChapters++;
+                        consecutiveEmpty++;
                         Log("  " + c.Title + " —— 对照源没有内容，跳过");
+
+                        // ★ 连着 5 章都拿不到 → 判定源已经不可用，直接中止。
+                        //   否则用户会对着一个"每章都跳过"的进度条干等到跑满 N 章，
+                        //   最后只拿到一份"全跳过"的报告 —— 那是白等。
+                        //   探活已经先拦了一道，这里是兜底（源可能中途挂掉）。
+                        if (consecutiveEmpty >= 5)
+                        {
+                            Log("★ 连续 " + consecutiveEmpty + " 章都拿不到内容，判定对照源已不可用，提前中止。");
+                            result.AbortedEarly = true;
+                            break;
+                        }
                         continue;
                     }
+                    consecutiveEmpty = 0;
 
                     var diffs = TypoFinder.CompareChapter(c.Title, c.Text, text);
                     if (diffs.Count == 0)
@@ -2931,7 +3009,10 @@ namespace TomatoBiquga
 
                 if (SuppressDialogs) return;
                 string tip;
-                if (result.ComparedChapters == 0)
+                if (result.AbortedEarly)
+                    tip = "★ 对照源中途不可用了（连续多章拿不到内容），已提前中止。\n" +
+                          "这次的结果不完整，换个源重跑一次。";
+                else if (result.ComparedChapters == 0)
                     tip = "一章都没比对上：对照源可能抓不到内容（站点风控或改版）。";
                 else if (result.Diffs.Count == 0)
                     tip = "两个源逐字一致，没发现差异。";

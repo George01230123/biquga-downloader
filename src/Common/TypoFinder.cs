@@ -94,6 +94,12 @@ namespace TomatoBiquga
             /// <summary>对照源的名字（写进报告）</summary>
             public string OtherSource = "";
 
+            /// <summary>
+            /// 是否因为**对照源连续拿不到内容**而提前中止。
+            /// 用来把提示语从含糊的"可能抓不到内容"升级成明确的"源不可用，别白等了"。
+            /// </summary>
+            public bool AbortedEarly;
+
             /// <summary>差异最多的前 N 章（给报告用）</summary>
             public Dictionary<string, int> PerChapter = new Dictionary<string, int>();
 
@@ -284,6 +290,12 @@ namespace TomatoBiquga
             sb.AppendLine(new string('=', 60));
             sb.AppendLine();
             sb.AppendLine(r.Summary());
+            if (r.AbortedEarly)
+            {
+                sb.AppendLine();
+                sb.AppendLine("★★ 注意：本次比对**提前中止**了 —— 对照源连续多章拿不到内容。");
+                sb.AppendLine("   下面的结果不完整，请换个源重跑一次再参考。");
+            }
             sb.AppendLine();
             sb.AppendLine("怎么读这份报告：");
             sb.AppendLine("  · 「主源」是你已经下载的这份，「对照源」是另一份。两个源同时错成同一个字的");

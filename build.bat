@@ -37,8 +37,14 @@ set COMMON=src\Common\Models.cs src\Common\Log.cs src\Common\Http.cs src\Common\
 set SITES=src\Sites\BiqugaSite.cs src\Sites\BiqugaMobileSite.cs src\Sites\FanqieSite.cs src\Sites\TomatoCore.cs
 
 echo [2/6] Building main program (GUI)...
-"%CSC%" %FLAGS% /target:winexe /out:"dist\_build_tmp.exe" %REFS% ^
- src\AssemblyInfo.cs src\Program.cs src\MainForm.cs %COMMON% %SITES%
+rem OfflineTests.cs is linked in ONLY for this target (not for the other 6), and
+rem /define:SELFTEST is set, so it lets the GUI exe run the full offline suite via
+rem `--selftest` from the SAME binary the user is running -- a bug report becomes one
+rem command instead of "please also download _offlinetests.exe".
+rem /main is required because OfflineTests.cs also declares a Main (it is the entry
+rem point of _offlinetests.exe).
+"%CSC%" %FLAGS% /target:winexe /main:TomatoBiquga.Program /define:SELFTEST /out:"dist\_build_tmp.exe" %REFS% ^
+ src\AssemblyInfo.cs src\Program.cs src\MainForm.cs tests\OfflineTests.cs %COMMON% %SITES%
 if errorlevel 1 goto failed
 
 echo [3/6] Building command line self tests...
