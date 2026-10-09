@@ -807,6 +807,25 @@ namespace TomatoBiquga
             return "biquga";
         }
 
+        /// <summary>
+        /// 下载阶段的并发数（并发抓取正文 + 按目录顺序落盘，见 DownloadRunner.Workers）。
+        /// 取值规则和目录遍历保持一致：站点配置.ini 里写了 workers 就用它（用户手改优先），
+        /// 否则按站点取设置里的并发值。
+        ///
+        /// 番茄保持 1（串行）：它的正文风控对并发最敏感，而且正文本来就要靠第三方核心，
+        /// 并发下载只会更快撞验证码，不会更快拿到正文。
+        /// </summary>
+        private int DownloadWorkersFor(ISite site)
+        {
+            var prof = _profile ?? SiteProfileStore.Get(SiteKeyOf(site));
+            if (prof != null && prof.Workers > 0) return prof.Workers;
+            if (site is BiqugaSite) return _settings.BiqugaPcWorkers;
+            if (site is BiqugaMobileSite)
+                return (chkOffline != null && chkOffline.Checked)
+                    ? _settings.BiqugaOfflineWorkers : _settings.BiqugaOnlineWorkers;
+            return 1;
+        }
+
         // ============================================================
         //  书架 / 任务队列 / 检查更新
         // ============================================================
@@ -1494,6 +1513,7 @@ namespace TomatoBiquga
                 RootDir = root,
                 Log = Log,
                 RetryPasses = _settings.RetryPasses,
+                Workers = DownloadWorkersFor(site),
                 OutputEncoding = CurrentFileEncoding(),
                 OutputTraditional = _settings.OutputTraditional,
                 IsCanceled = () => _cancel,
@@ -1666,6 +1686,7 @@ namespace TomatoBiquga
                     RootDir = root,
                     Log = Log,
                     RetryPasses = _settings.RetryPasses,
+                    Workers = DownloadWorkersFor(site),
                     AppendToExistingFile = true,
                     CumulativeOkCount = startCumulative,
                     OutputTraditional = _settings.OutputTraditional,
@@ -1860,6 +1881,7 @@ namespace TomatoBiquga
                     Chapters = new List<ChapterInfo>(),
                     RootDir = root,
                     Log = Log,
+                    Workers = DownloadWorkersFor(site),
                     OutputEncoding = CurrentFileEncoding(),
                     OutputTraditional = _settings.OutputTraditional,
                     OnProgress = (n, total) => UiInvoke(() =>
@@ -3161,6 +3183,7 @@ namespace TomatoBiquga
                         RootDir = root,
                         Log = log,
                         RetryPasses = _settings.RetryPasses,
+                        Workers = DownloadWorkersFor(_site),
                         OutputEncoding = CurrentFileEncoding(),
                         OutputTraditional = _settings.OutputTraditional,
                         AppendToExistingFile = append,

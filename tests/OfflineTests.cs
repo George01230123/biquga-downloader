@@ -146,6 +146,8 @@ namespace TomatoBiquga
                 TestFillMissing(work, ref _fakeNet);
                 TestOutputEncoding(work, ref _fakeNet);
                 TestIncrementalAppend(work, ref _fakeNet);
+                TestParallelDownload(work);
+                TestCurlPathConcurrent();
                 TestEpub(work);
                 TestParseTxt(work);
                 TestLayout();
@@ -176,6 +178,8 @@ namespace TomatoBiquga
                 TestSettingsRoundTrip(work);
                 // 日志里不许写死总量
                 TestNoHardcodedTotalsInLogs();
+                // 正文清洗：不许误杀正文 + 真实广告要删掉
+                TestTextCleanerCorpus();
             }
             catch (Exception ex)
             {
@@ -332,9 +336,16 @@ namespace TomatoBiquga
 
             // 短行 + 弱标记 → 才算广告
             Check("短行带弱标记算广告", TextCleaner.IsAdLine("求推荐票"));
-            Check("短行带月票算广告", TextCleaner.IsAdLine("投月票支持作者"));
             Check("短行带加入书签算广告", TextCleaner.IsAdLine("加入书签"));
             Check("短行带笔趣阁算广告", TextCleaner.IsAdLine("笔趣阁手机版"));
+
+            // ★ 「投月票支持作者」这条原来断言是"广告"，我改成断言"是正文"。
+            //   理由：它读起来就是一句正常小说句子，判据（标记占整行比例）也够不着门槛
+            //   （"月票"2 字 / 全行 8 字 = 25%）。
+            //   而这个类的最高原则是**宁可漏删广告、不可误删正文** ——
+            //   漏一行广告用户看得见，删一行正文用户永远发现不了。
+            Check("宁可漏删：「投月票支持作者」按正文放过", !TextCleaner.IsAdLine("投月票支持作者"));
+            Eq("宁可漏删：它被原样保留", "投月票支持作者", TextCleaner.CleanBody("投月票支持作者"));
 
             // ---- 强标记：不管多长都判广告 ----
             Check("强标记 请记住本站 短", TextCleaner.IsAdLine("请记住本站"));
@@ -342,6 +353,14 @@ namespace TomatoBiquga
             Check("强标记 最新网址", TextCleaner.IsAdLine("最新网址：www.example.com"));
             Check("强标记 一秒记住", TextCleaner.IsAdLine("一秒记住【笔趣阁】"));
             Check("强标记 内容来源声明", TextCleaner.IsAdLine("本站所有内容来源于互联网，如有侵权请联系我们删除"));
+
+            // ★ 但强标记出现在**正常句子中段**时不能整行删掉（实测踩过的误杀）
+            Check("强标记在中段：带句末标点 → 正文",
+                !TextCleaner.IsAdLine("他能够一秒记住整页内容，过目不忘。"));
+            Check("强标记在中段：带句末标点 → 正文（最新网址）",
+                !TextCleaner.IsAdLine("他查到了最新网址，记在了本子上。"));
+            Eq("强标记在中段：原样保留", "他查到了最新网址，记在了本子上。",
+                TextCleaner.CleanBody("他查到了最新网址，记在了本子上。"));
 
             // ---- 分页残留 --1120dmabgioie1777198--> ----
             Eq("StripPageMark 整行只有标记→丢弃", "", TextCleaner.StripPageMark("--1120dmabgioie1777198-->"));
@@ -1153,6 +1172,160 @@ namespace TomatoBiquga
             if (mk < 0) return 0;
             int nl = text.IndexOf('\n', mk);
             return nl < 0 ? 0 : nl + 1;
+        }
+
+        // ============================================================
+        //  11.5) 并发下载（Workers > 1）：抓取可以乱序完成，落盘必须仍按目录顺序
+        // ============================================================
+        //
+        // 为什么单独守一条：并发版把「取数」和「记账 + 落盘」拆开跑，最危险的
+        // 失败模式是**顺序错乱** —— 章节按"谁先抓完"的顺序写进文件，正文和标题
+        // 全部对不上，而章数、字数、成功数这些断言**全都是绿的**。
+        // 所以这里用一个"越靠后的章越快返回"的假站点逼出乱序完成，
+        // 再拿同一批章节跑一遍串行版当基准，逐块比对两份产物。
+
+        /// <summary>乱序完成的假站点：id 越大返回越快，指定章节分别失败/返回超短内容</summary>
+        private class OutOfOrderFakeSite : ISite
+        {
+            public string FailId;
+            public string ShortId;
+            public string Name { get { return "ooo-fake"; } }
+            public List<BookInfo> Search(string keyword, Action<string> log) { return new List<BookInfo>(); }
+            public BookInfo LoadBook(BookInfo item, Action<string> log) { return item; }
+            public string LoadChapter(BookInfo book, ChapterInfo chapter, Action<string> log)
+            {
+                int n;
+                int.TryParse(chapter.Id.Substring(1), out n);
+                System.Threading.Thread.Sleep(Math.Max(0, 24 - n) * 4);   // 后面的章先完成
+                if (chapter.Id == FailId) throw new Exception("模拟站点抽风");
+                if (chapter.Id == ShortId) return "太短";
+                var sb = new StringBuilder();
+                for (int i = 0; i < 5; i++)
+                    sb.Append("这是 ").Append(chapter.Title).Append(" 的第 ").Append(i + 1)
+                      .Append(" 段正文内容，用来让长度超过 40 字的门槛。\n");
+                return sb.ToString();
+            }
+        }
+
+        private static void TestParallelDownload(string work)
+        {
+            var dir = Path.Combine(work, "parallel");
+            Directory.CreateDirectory(dir);
+            var book = new BookInfo { Site = "biquga", Title = "并发测试", Author = "作者", Dir = "/8_8/", Url = "u" };
+            var chapters = new List<ChapterInfo>();
+            for (int i = 1; i <= 12; i++)
+                chapters.Add(new ChapterInfo { Id = "c" + i, Title = "第" + i + "章 标题" + i, Order = i - 1 });
+            book.Chapters.AddRange(chapters);
+
+            // 串行版做基准（Workers=1 就是改动前的行为）
+            var serialLog = new List<string>();
+            var serial = new DownloadRunner
+            {
+                Site = new OutOfOrderFakeSite { FailId = "c5", ShortId = "c9" },
+                Book = book,
+                Chapters = chapters,
+                RootDir = Path.Combine(dir, "serial"),
+                Workers = 1,
+                RetryPasses = 0,
+                Log = serialLog.Add,
+            };
+            serial.Run();
+
+            // 并发版：4 线程抓取
+            var parLog = new List<string>();
+            var par = new DownloadRunner
+            {
+                Site = new OutOfOrderFakeSite { FailId = "c5", ShortId = "c9" },
+                Book = book,
+                Chapters = chapters,
+                RootDir = Path.Combine(dir, "parallel"),
+                Workers = 4,
+                RetryPasses = 0,
+                Log = parLog.Add,
+            };
+            par.Run();
+
+            Eq("并发：成功章数与串行一致", serial.Ok, par.Ok);
+            Eq("并发：跳过章数与串行一致", serial.Skipped, par.Skipped);
+            Eq("并发：失败章数与串行一致", serial.Failed, par.Failed);
+            Eq("并发：确实是 10 成 1 跳 1 败", "10/1/1", par.Ok + "/" + par.Skipped + "/" + par.Failed);
+
+            // 产物比对：锚点顺序 + 标题正文
+            var sIds = new List<string>();
+            foreach (var s in ChapterIndex.Scan(serial.OutputFile)) sIds.Add(s.Id);
+            var pIds = new List<string>();
+            foreach (var s in ChapterIndex.Scan(par.OutputFile)) pIds.Add(s.Id);
+            Eq("并发：锚点顺序与串行完全一致", string.Join(",", sIds), string.Join(",", pIds));
+            Eq("并发：写进文件的顺序是目录顺序，不是完成顺序",
+                "c1,c2,c3,c4,c6,c7,c8,c10,c11,c12", string.Join(",", pIds));
+
+            var sText = File.ReadAllText(serial.OutputFile, Encoding.UTF8);
+            var pText = File.ReadAllText(par.OutputFile, Encoding.UTF8);
+            // 表头里有下载时间，两边不会逐字节相同 —— 从分隔行之后开始比
+            var sBody = sText.Substring(sText.IndexOf(new string('=', 46), StringComparison.Ordinal) + 47);
+            var pBody = pText.Substring(pText.IndexOf(new string('=', 46), StringComparison.Ordinal) + 47);
+            Eq("并发：正文部分与串行逐字一致", sBody, pBody);
+
+            // 日志里的"完成"顺序也必须是目录顺序（否则用户看到的进度是乱的）
+            var sOrder = new List<string>();
+            foreach (var l in serialLog) if (l.Contains("完成 ")) sOrder.Add(l);
+            var pOrder = new List<string>();
+            foreach (var l in parLog) if (l.Contains("完成 ")) pOrder.Add(l);
+            Eq("并发：完成日志的顺序与串行一致", string.Join("|", sOrder), string.Join("|", pOrder));
+
+            Check("并发：失败章节记了原因", par.FailReasons.ContainsKey("c5"));
+            Check("并发：缺失报告里写了失败章",
+                par.ReportFile != null && File.ReadAllText(par.ReportFile, Encoding.UTF8).Contains("标题5"));
+            Check("并发：缺失报告里也写了跳过章",
+                par.ReportFile != null && File.ReadAllText(par.ReportFile, Encoding.UTF8).Contains("标题9"));
+        }
+
+        /// <summary>
+        /// Http.CurlPath 的并发正确性：多线程同时取，结果必须一致（要么都是路径、要么都是 null）。
+        ///
+        /// 为什么要有这条：它原来是"先置 _curlChecked 再探测路径"，于是并发抓取时
+        /// 只要先抢到锁的线程被切走，其余线程就会看到"已检查过、但路径是 null"，
+        /// 全体判定 curl 不可用 → 全部走 .NET 回退；而 biquga 拒绝 .NET 的 TLS 握手，
+        /// 每个请求要白等 25 秒超时 —— 症状是"开了并发反而更慢"，而且不报任何错。
+        /// 修法是双重检查锁 + 最后才置位（见 Http.CurlPath 的注释）。
+        /// 这条测试用"同时起跑"逼近那个竞态窗口：旧代码实测 6 个线程里 5 个拿到 null。
+        /// </summary>
+        private static void TestCurlPathConcurrent()
+        {
+            const int n = 16;
+            var results = new string[n];
+            var barrier = new System.Threading.Barrier(n);
+            var threads = new System.Threading.Thread[n];
+            for (int i = 0; i < n; i++)
+            {
+                int idx = i;
+                threads[i] = new System.Threading.Thread(() =>
+                {
+                    barrier.SignalAndWait();          // 让 16 个线程尽量同一瞬间去取
+                    results[idx] = Http.CurlPath;
+                });
+                threads[i].IsBackground = true;
+                threads[i].Start();
+            }
+            foreach (var t in threads) t.Join(5000);
+
+            bool allSame = true;
+            for (int i = 1; i < n; i++)
+                if (results[i] != results[0]) allSame = false;
+            Check("curl 路径：16 线程同时取，结果必须一致（不能有的拿到路径、有的拿到 null）", allSame);
+            // 这台机器上应该有系统自带 curl；若真没有，也只要求"一致地都是 null"
+            if (SystemCurlExists())
+                Check("curl 路径：系统自带 curl.exe 存在时应当能取到", results[0] != null);
+        }
+
+        private static bool SystemCurlExists()
+        {
+            try
+            {
+                return File.Exists(Path.Combine(Environment.SystemDirectory, "curl.exe"))
+                    || File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "curl.exe"));
+            }
+            catch { return false; }
         }
 
         /// <summary>假的站点：直接返回造好的正文，不联网（用来测下载流程本身）</summary>
@@ -3297,6 +3470,113 @@ namespace TomatoBiquga
                 d = d.Parent;
             }
             return null;
+        }
+
+        // ============================================================
+        //  21) 正文清洗：**不许误杀正文**（P0-1）+ 真实广告必须删掉（P0-2）
+        // ============================================================
+
+        /// <summary>
+        /// 表驱动地验 TextCleaner.CleanBody。
+        ///
+        /// 为什么必须表驱动 + 逐条断言最终结果：
+        /// 这个函数的前一版只判「广告标记是否出现」，结果把这些正常句子毁了 ——
+        ///   「他还在为找不到回家的路而发愁。」→「他」
+        ///   「他能够一秒记住整页内容，过目不忘。」→ 整行删除
+        /// 15 条语料里 11 条被破坏。而**误删正文是静默损坏**：
+        /// 用户看不出来，会以为作者就这么写的。所以这段断言的优先级高于一切广告规则。
+        ///
+        /// 第二段语料（真实广告）来自用户已下载的 5 本书，用来防止
+        /// "为了修误杀把广告规则改废"。两段必须同时绿。
+        /// </summary>
+        private static void TestTextCleanerCorpus()
+        {
+            // ---------- 第一段：这些**必须原样保留**（正常正文 / 作者的话）----------
+            var mustKeep = new[]
+            {
+                "他还在为找不到回家的路而发愁。",
+                "她低声问道：你在关注公众号吗？",
+                "别信什么全网免费的说法。",
+                "他想看看最新章节请往下翻。",
+                "他关注公众号已经三年了。",
+                "他能够一秒记住整页内容，过目不忘。",
+                "他查到了最新网址，记在了本子上。",
+                "那本书的笔趣阁版本比这个全。",
+                "他打开了手机版页面继续阅读。",
+                "我要给你投月票",
+                "这一章讲的是关于推荐票的故事，主角收到了很多推荐票，他很开心。",
+                "真人在线服务很周到。",
+                "“来，红包收着。”陈果递上大红包。",
+                "“校长办公室里，有老师发红包，数量有限，先到先得。”",
+                "卫国公吐出一口浊气：“罢了，你们穷得够呛，估计也办不起酒席。”",
+                "他算出了 x < y 的结果。",
+                "价格 <100 元",
+                // 作者的话：作者真的会写"关注我的公众号"，删了就是毁书
+                "————大伙可以关注下我的公众号“宅猪”，精彩书评、人物图、剧情讨论期待你们的参与！",
+                "ps：国师已经成神，那残老村的诸老呢？大伙可以关注下公众号“宅猪”，查看相关资料。",
+                "————宅在家里很久了，难得出门一次，更新受到影响，这里说一声抱歉！",
+            };
+            foreach (var line in mustKeep)
+            {
+                var got = TextCleaner.CleanBody(line);
+                Eq("清洗不许误杀：「" + Short(line) + "」", line, got);
+            }
+
+            // ---------- 第二段：这些**必须被删掉**（真实广告，逐条来自已下载的书）----------
+            var mustDrop = new[]
+            {
+                "【领红包】现金or点币红包已经发放到你的账户！微信关注公.众.号【书友大本营】领取！",
+                "#送888现金红包#关注vx.公众号【书友大本营】，看热门神作，抽888现金红包！",
+                "没钱看小说？送你现金or点币，限时1天领取！关注公·众·号【书友大本营】，免费领！",
+                "交流好书，关注vx公众号.【书友大本营】。现在关注，可领现金红包！",
+                "【看书福利】关注公众..号【书友大本营】，每天看书抽现金点币!",
+                "【收集免费好书】关注v.x【书友大本营】推荐你喜欢的小说，领现金红包！",
+                "本书由公众号整理制作。关注VX【书友大本营】，看书领现金红包！",
+                "【送红包】阅读福利来啦！你有最高888现金红包待抽取！关注weixin公众号【书友大本营】抽红包！",
+                "大家好，我们公众.号每天都会发现金、点币红包，只要关注就可以领取。年末最后一次福利，请大家抓住机会。公众号[书友大本营]",
+                "，最快更新神级高手在都市最新章节！",
+                "送你一个现金红包",
+            };
+            foreach (var line in mustDrop)
+            {
+                var got = TextCleaner.CleanBody(line);
+                Eq("清洗必须删广告：「" + Short(line) + "」", "", got);
+            }
+
+            // 行尾拼接：正文留下、广告切掉
+            var tail = TextCleaner.CleanBody("他转身就走。帮你找书陪你尬聊");
+            Eq("清洗：行尾拼接的广告被切掉、正文保留", "他转身就走。", tail);
+
+            var tail2 = TextCleaner.CleanBody(
+                "“是!”苏沐橙拿着她的新角色开心地去练级了。有最新章节更新及时");
+            Check("清洗：正文句尾拼接广告后正文还在（" + Short(tail2) + "）",
+                tail2.IndexOf("苏沐橙", StringComparison.Ordinal) >= 0);
+
+            // ---------- 第三段：反爬水印 ----------
+            var wm = "有异能者挺身而出，提出了建议。<span style='display:none'>gfbmmjD6vtLSaDjNAMr7x+abcdefghijklmnop==</span>";
+            var wmOut = TextCleaner.CleanBody(wm);
+            Check("水印：现形标签被清掉（" + Short(wmOut) + "）",
+                wmOut.IndexOf("span", StringComparison.OrdinalIgnoreCase) < 0);
+            Check("水印：正文保住了", wmOut.IndexOf("有异能者挺身而出", StringComparison.Ordinal) >= 0);
+
+            var blob = "gfbmmjD6vtLSaDjNAMr7x+abcdefghijklmnopqrstuvwxyz0123456789==";
+            Eq("水印：纯 base64 行被丢弃", "", TextCleaner.CleanBody(blob));
+            Eq("水印：含 < 的正常句子不动（反例）", "他算出了 x < y 的结果。",
+                TextCleaner.CleanBody("他算出了 x < y 的结果。"));
+
+            // ---------- 第四段：幂等性（清洗两遍结果一致）----------
+            foreach (var line in mustKeep)
+            {
+                var once = TextCleaner.CleanBody(line);
+                var twice = TextCleaner.CleanBody(once);
+                Eq("清洗：幂等（第二遍不再改动）「" + Short(line) + "」", once, twice);
+            }
+        }
+
+        private static string Short(string s)
+        {
+            if (s == null) return "null";
+            return s.Length <= 18 ? s : s.Substring(0, 18) + "…";
         }
 
         // ============================================================

@@ -68,6 +68,17 @@ namespace TomatoBiquga
         public static int LastStatusCode;
 
         private static readonly Random Rnd = new Random();
+
+        /// <summary>
+        /// Random 不是线程安全的：多个下载线程同时 Rnd.Next() 会让它内部状态坏掉、
+        /// 之后**永远返回 0**（.NET Framework 的已知行为），于是"随机间隔"变成固定值、
+        /// 抖动退化成 0 —— 并发下载正是最容易踩到它的场景。所有取随机数都走这里。
+        /// </summary>
+        private static int NextRandom(int maxExclusive)
+        {
+            lock (Rnd)
+                return Rnd.Next(maxExclusive);
+        }
         private static string _curlPath;
         private static bool _curlChecked;
 
@@ -83,25 +94,45 @@ namespace TomatoBiquga
             MaxDelayMs = maxDelayMs;
         }
 
+        /// <summary>
+        /// curl.exe 的路径（找不到就是 null，请求会走 .NET 回退）。
+        ///
+        /// ★ 这里必须"先探好路径、最后才置 _curlChecked"：
+        /// 原来的写法是**先置位再探测**，于是并发抓取时（下载/目录页并发）
+        /// 只要线程 A 刚置完位就被切走，B~Z 就会看到"已检查过但路径还是 null"，
+        /// 直接判定 curl 不可用 → 全部走 .NET 回退；而 biquga 恰恰**拒绝 .NET 的
+        /// TLS 握手**，每个请求要白等 25 秒超时才算完 —— 表现就是"并发了反而更慢"。
+        /// 这个竞态是并发下载实测抓出来的（6 个线程同时取路径，5 个拿到 null）。
+        /// </summary>
         public static string CurlPath
         {
             get
             {
                 if (!_curlChecked)
                 {
-                    _curlChecked = true;
-                    foreach (var p in new[]
+                    lock (CurlLock)
                     {
-                        Path.Combine(Environment.SystemDirectory, "curl.exe"),
-                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "curl.exe"),
-                    })
-                    {
-                        if (File.Exists(p)) { _curlPath = p; break; }
+                        if (!_curlChecked)
+                        {
+                            string found = null;
+                            foreach (var p in new[]
+                            {
+                                Path.Combine(Environment.SystemDirectory, "curl.exe"),
+                                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "curl.exe"),
+                            })
+                            {
+                                if (File.Exists(p)) { found = p; break; }
+                            }
+                            _curlPath = found;
+                            _curlChecked = true;      // ★ 最后才置位：置位就意味着上面的值已经可见
+                        }
                     }
                 }
                 return _curlPath;
             }
         }
+
+        private static readonly object CurlLock = new object();
 
         public static bool CurlAvailable { get { return CurlPath != null; } }
 
@@ -402,7 +433,7 @@ namespace TomatoBiquga
             long ms = throttled ? 2000L << attempt : 500L << attempt;
             if (ms > MaxBackoffMs) ms = MaxBackoffMs;
             // 抖动：避免多个并发线程退避后同时回来（惊群）
-            ms += Rnd.Next(0, (int)Math.Max(1, ms / 4));
+            ms += NextRandom((int)Math.Max(1, ms / 4));
             Thread.Sleep((int)Math.Min(ms, int.MaxValue));
         }
 
@@ -715,7 +746,7 @@ namespace TomatoBiquga
 
         public static void Polite()
         {
-            Thread.Sleep(MinDelayMs + Rnd.Next(Math.Max(1, MaxDelayMs - MinDelayMs)));
+            Thread.Sleep(MinDelayMs + NextRandom(Math.Max(1, MaxDelayMs - MinDelayMs)));
         }
 
         // ---------------------------------------------------------- HTML 工具
