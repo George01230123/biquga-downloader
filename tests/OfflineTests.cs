@@ -39,6 +39,7 @@ namespace TomatoBiquga
         private static int _pass;
         private static int _fail;
         private static bool _verbose;
+        private static bool _skipLayout;
         private static int _fakeNet;      // 假站点的计数器（让每次 LoadChapter 的输出略有不同）
         private static readonly List<string> Failures = new List<string>();
 
@@ -118,10 +119,30 @@ namespace TomatoBiquga
             _fail = 0;
             Failures.Clear();
             _verbose = false;
+            _skipLayout = false;
             if (args != null)
                 foreach (var a in args)
+                {
                     if (string.Equals(a, "--verbose", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(a, "-v", StringComparison.OrdinalIgnoreCase)) _verbose = true;
+
+                    // ★ `--skip-layout`：跳过「布局体检」那一条（只有 GUI 的 --selftest 会传）。
+                    //
+                    //   为什么必须能跳过：那条断言会**真的 new 一个 MainForm** 并测量控件尺寸，
+                    //   而量出来的尺寸依赖**进程的 DPI 环境** ——
+                    //   同一个断言在控制台进程（_offlinetests.exe）通过，
+                    //   在 GUI 进程（winexe + --selftest）失败，
+                    //   报"TextBox 越界：控件 0,0 230x27，父容器可显示 230x24"。
+                    //   我试着把 DPI 设置挪到最前面想统一环境，结果**两条路径全红**
+                    //   （8 个尺寸全失败），比原来更糟 —— 所以放弃"让它在哪种进程都过"这条路。
+                    //
+                    //   不担心因此漏掉布局问题：布局有**两个专门的探针**在 CI 里守着 ——
+                    //     _layoutprobe.exe（越界/重叠逐条报出）
+                    //     _textfit.exe   （每个按钮的文字放不放得下）
+                    //   它们都是控制台程序，测量环境稳定。
+                    if (string.Equals(a, "--skip-layout", StringComparison.OrdinalIgnoreCase))
+                        _skipLayout = true;
+                }
 
             Console.WriteLine("=== 离线单元测试（不联网）===");
 
@@ -819,6 +840,10 @@ namespace TomatoBiquga
 
         private static void TestLayout()
         {
+            // see --skip-layout in Run(): measuring a real MainForm depends on the
+            // process DPI environment, so this one cannot pass from inside the GUI exe.
+            if (_skipLayout) return;
+
             // 先自证"检查器真的能发现问题"：故意摆两个重叠控件 + 一个越界控件，必须都能报出来。
             // （否则"布局无越界"这句可能只是因为检查器永远返回空 —— 等于没测。）
             using (var probe = new Form())

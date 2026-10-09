@@ -31,6 +31,23 @@
     <CodePage>65001</CodePage>
     <NoWarn>1591;0618</NoWarn>
     <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+
+    <!-- ============================================================
+         ★ 下面两项必须和 build.bat 里那条 csc 命令行**保持一致**，
+           否则「本机编的」和「CI 编的」会是两个不同的程序。
+
+         真实踩过的坑：v1.4.0 加 selftest 命令行开关时只在 build.bat 里做了
+         （加了 tests\OfflineTests.cs 与 /define:SELFTEST），忘了改这里。
+         结果本机 csc 编出来 365 KB、开关正常；
+         CI 用 dotnet build 编出来 259 KB、**开关直接开了个窗** ——
+         用户从 Release 下载的那份根本没有这个功能。
+         而 CI 全绿、发布成功，**没有任何地方报错**。
+
+         教训：编译清单有两处，改一处必须改另一处。
+         ============================================================ -->
+    <DefineConstants>SELFTEST</DefineConstants>
+    <!-- OfflineTests.cs 自带一个 Main，必须指明入口 -->
+    <StartupObject>TomatoBiquga.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -46,6 +63,8 @@
     <Compile Include="..\src\MainForm.cs" />
     <Compile Include="..\src\Common\*.cs" />
     <Compile Include="..\src\Sites\*.cs" />
+    <!-- 与 build.bat 对齐：SELFTEST 开关需要它（见上面 DefineConstants 的说明） -->
+    <Compile Include="..\tests\OfflineTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

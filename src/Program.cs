@@ -28,24 +28,29 @@ namespace TomatoBiquga
             // 目标里存在的类型。实测连踩两次：
             //   ① 直接调 OfflineTests.Run → _selftest.exe 报 CS0103 找不到 OfflineTests；
             //   ② 挪进 SelfTestEntry.cs     → 又报找不到 SelfTestEntry（同一原因）。
-            // 正解：只有 GUI 目标带 /define:SELFTEST（见 build.bat）。
+            // 正解：只有 GUI 目标带 SELFTEST 常量（build.bat 与 *.csproj **两处**都要改）。
             //
             // 收益：**"测试跑通的那个二进制"和"用户手里这个二进制"从此是同一个文件**。
 #if SELFTEST
             if (args != null && args.Length > 0 &&
                 string.Equals(args[0], "--selftest", StringComparison.OrdinalIgnoreCase))
             {
-                // ★ GUI 子系统（/target:winexe）的进程**默认没有控制台**，
-                //   所以 Console.set_OutputEncoding 会抛 IOException（实测
-                //   "句柄无效"，退出码 0xE0434352）。必须先 attach 到父进程
-                //   （也就是调用它的那个 cmd / PowerShell）的控制台，输出才有着落。
-                //   直接双击 exe 时没有父控制台，attach 会失败 —— 那就当成
-                //   "没地方写输出"，测试照跑，退出码照样有意义。
+                // ★ GUI 子系统（winexe）的进程**默认没有控制台**，
+                //   Console.set_OutputEncoding 会抛 IOException（"句柄无效"，退出码 0xE0434352）。
+                //   必须先 attach 到父进程（调用它的那个 cmd/PowerShell）的控制台。
                 try { AttachConsole(-1); } catch { }
                 try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { }
 
+                // ★ 跳过「布局体检」那一条 —— 详见 OfflineTests.Run 里 --skip-layout 的注释：
+                //   它会真的 new 一个 MainForm 去量控件，量出来的尺寸依赖进程的 DPI 环境，
+                //   于是同一个断言在控制台进程通过、在 GUI 进程失败。
+                //   布局另有 _layoutprobe.exe / _textfit.exe 两个专门的探针在 CI 里守着。
+                var inner = new string[(args == null ? 0 : args.Length) + 1];
+                if (args != null) Array.Copy(args, inner, args.Length);
+                inner[inner.Length - 1] = "--skip-layout";
+
                 int code;
-                try { code = OfflineTests.Run(args); }
+                try { code = OfflineTests.Run(inner); }
                 catch (Exception ex)
                 {
                     try { Console.Error.WriteLine("自测异常：" + ex); } catch { }

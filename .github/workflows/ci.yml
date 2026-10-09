@@ -105,6 +105,35 @@ jobs:
           dotnet build build/NovelDownloader.E2E.csproj -c Release
           dotnet build build/NovelDownloader.LiveProbe.csproj -c Release
 
+      # ★ 这条是 v1.4.0 那次事故补的护栏。
+      #
+      #   事故经过：给主程序加 `--selftest` 时，只在 build.bat（本机 csc 那条路）里
+      #   加了 tests\OfflineTests.cs 和 /define:SELFTEST，忘了同步改
+      #   build/NovelDownloader.csproj（CI 的 dotnet build 那条路）。
+      #   结果：本机产出 365 KB、`--selftest` 正常；CI 产出 259 KB、
+      #   **`--selftest` 直接开了个窗** —— 用户从 Release 下载的那份根本没这功能。
+      #   而 CI 全绿、发布成功，**没有任何地方报错**，是我拿发布版实测才发现的。
+      #
+      #   所以现在在这里**真的跑一次** `--selftest`，要求退出码 0 且输出里有测试结果。
+      #   两条编译路径再出现不一致，这一步立刻红。
+      - name: Verify --selftest works in the produced exe
+        shell: pwsh
+        run: |
+          $exe = 'dist/NovelDownloader.exe'
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru `
+                 -RedirectStandardOutput 'selftest-out.txt' -RedirectStandardError 'selftest-err.txt'
+          Get-Content selftest-out.txt -Tail 4
+          if ((Test-Path selftest-err.txt) -and (Get-Item selftest-err.txt).Length -gt 0) {
+            Get-Content selftest-err.txt -Tail 10
+          }
+          if ($p.ExitCode -ne 0) {
+            throw "主程序 --selftest 退出码 $($p.ExitCode)（期望 0）—— 两条编译路径大概率不一致了，检查 build.bat 与 build/*.csproj 的编译清单是否对齐"
+          }
+          $out = Get-Content selftest-out.txt -Raw
+          if ($out -notmatch '通过 \d+/\d+') { throw "stdout 里没有测试结果，说明 --selftest 没接上" }
+          Write-Host '--selftest 在主程序里工作正常'
+
       - name: Package
         shell: pwsh
         run: |
