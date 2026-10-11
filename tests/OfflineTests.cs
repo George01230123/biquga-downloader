@@ -109,6 +109,58 @@ namespace TomatoBiquga
         }
 
         /// <summary>
+        /// 找一个**确实能写**的临时目录。首选 %TEMP%，逐级降级到 exe 同级、当前目录。
+        /// 全都建不出来时返回空串（"内存模式"），调用方据此跳过需要落盘的用例 ——
+        /// 关键是**绝不因为建不出目录就让整个测试进程崩掉**。
+        /// </summary>
+        private static string MakeWorkDir()
+        {
+            var name = "novel-offline-tests-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            var cands = new List<string>();
+            try { cands.Add(Path.Combine(Path.GetTempPath(), name)); } catch { }
+            try { cands.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name)); } catch { }
+            try { cands.Add(Path.Combine(Directory.GetCurrentDirectory(), name)); } catch { }
+
+            foreach (var d in cands)
+            {
+                try
+                {
+                    Directory.CreateDirectory(d);
+                    // 建目录成功 ≠ 能写，再真的写一个文件探一下
+                    var probe = Path.Combine(d, ".write-probe");
+                    File.WriteAllText(probe, "ok");
+                    File.Delete(probe);
+                    return d;
+                }
+                catch { }
+            }
+            return "";   // 内存模式
+        }
+
+        /// <summary>已验证可写的临时根（<see cref="MakeWorkDir"/> 成功后记下来）</summary>
+        private static string _workRoot;
+
+        /// <summary>
+        /// 给单个用例建一个子目录。
+        ///
+        /// ★ 不要再在各处直接写 `Path.Combine(Path.GetTempPath(), ...)` ——
+        ///   %TEMP% 在某些环境里是**不可写**的（受限 token / 只读挂载 / 企业策略），
+        ///   那样每个用例都会抛 UnauthorizedAccessException，而报出来的信息极难定位。
+        ///   统一走这里，就会自动落在"探测过、确实能写"的那个根下面。
+        /// </summary>
+        private static string MakeCaseDir(string prefix)
+        {
+            var root = _workRoot;
+            if (string.IsNullOrEmpty(root))
+            {
+                try { root = Path.GetTempPath(); } catch { root = "."; }
+            }
+            var d = Path.Combine(root, prefix + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(d);
+            return d;
+        }
+
+        /// <summary>
         /// 对外入口：GUI exe 带 --selftest 时也会调这里，保证只有一份测试实现。
         /// 返回 0 = 全部通过（CI 直接看退出码）。
         /// </summary>
@@ -146,8 +198,27 @@ namespace TomatoBiquga
 
             Console.WriteLine("=== 离线单元测试（不联网）===");
 
-            var work = Path.Combine(Path.GetTempPath(), "novel-offline-tests-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            Directory.CreateDirectory(work);
+            // ★ 临时目录的创建必须在 try 里面，而且要能降级。
+            //
+            //   真实踩过的坑：在**某些环境下 `%TEMP%` 不可写**（受限的进程 token、
+            //   只读挂载、企业策略……），`Directory.CreateDirectory` 会抛
+            //   UnauthorizedAccessException。而它原来写在 try 外面 —— 于是整个测试
+            //   进程直接崩掉，报出来的是一句"无法打印异常字符串"，
+            //   既看不出是权限问题、也看不出崩在哪，非常难查。
+            //
+            //   现在的行为：首选 %TEMP%，不行就退到 exe 同级目录，再不行退到当前目录；
+            //   全都建不出来就**在内存里跑**（只有极少数需要落盘的用例会失败，
+            //   其余照跑），并且明确打印用的是哪个目录 —— 这样"是否降级"是看得见的。
+            var work = MakeWorkDir();
+            _workRoot = work;
+            if (work.Length == 0)
+            {
+                // 一个能写的目录都找不到。**不要崩** —— 照跑，让需要落盘的用例各自报错，
+                // 这样用户至少能看到"哪些过了、哪些因为没地方写文件而失败"。
+                Console.WriteLine("⚠ 找不到可写的临时目录（%TEMP% / exe 同级 / 当前目录都写不了）。");
+                Console.WriteLine("  需要落盘的用例会失败，其余照常跑。");
+            }
+            Console.WriteLine("临时目录：" + (work.Length == 0 ? "（无，内存模式）" : work));
             try
             {
                 TestSafeFileName();
@@ -1071,7 +1142,7 @@ namespace TomatoBiquga
 
         private static void TestIncrementalAppend(string work, ref int fakeNet)
         {
-            var dir = Path.Combine(Path.GetTempPath(), "novel-incr-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var dir = MakeCaseDir("novel-incr");
             Directory.CreateDirectory(dir);
             Eq("增量：测试目录已建好", true, Directory.Exists(dir));
 
@@ -1734,7 +1805,7 @@ namespace TomatoBiquga
 
         private static void TestOutputEncoding(string work, ref int fakeNet)
         {
-            var dir = Path.Combine(Path.GetTempPath(), "novel-enc-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var dir = MakeCaseDir("novel-enc");
             Directory.CreateDirectory(dir);
             var book = new BookInfo { Site = "biquga", Title = "编码测试", Author = "作者", Dir = "/5_5/", Url = "u" };
             var chs = new List<ChapterInfo>
@@ -1793,7 +1864,7 @@ namespace TomatoBiquga
         private static void TestFillMissing(string work, ref int fakeNet)
         {
             // ---------- 场景 A：整本下完了，中间有几个洞（站点侧空内容）----------
-            var dirA = Path.Combine(Path.GetTempPath(), "novel-fill-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var dirA = MakeCaseDir("novel-fill");
             Directory.CreateDirectory(dirA);
             var book = new BookInfo { Site = "biquga", Title = "补齐测试", Author = "作者", Dir = "/7_7/", Url = "u" };
             var all = new List<ChapterInfo>();
@@ -1851,7 +1922,7 @@ namespace TomatoBiquga
             Check("补齐：明确告知没有需要补的", logs2.Exists(l => l.Contains("没有需要补齐")));
 
             // ---------- 场景 B：断点续传（上半本下完，中断后继续）----------
-            var dirB = Path.Combine(Path.GetTempPath(), "novel-resume-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var dirB = MakeCaseDir("novel-resume");
             Directory.CreateDirectory(dirB);
             var book2 = new BookInfo { Site = "biquga", Title = "续传测试", Author = "作者", Dir = "/8_8/", Url = "u" };
             var all2 = new List<ChapterInfo>();
@@ -2265,7 +2336,7 @@ namespace TomatoBiquga
             Eq("封面：空地址返回空串", "", CoverFetcher.Absolutize("", "https://m.biquga.com/"));
 
             // Find：书目录里有封面就找得到，没有就是 null（不能用半张图冒充）
-            var dir = Path.Combine(Path.GetTempPath(), "novel-cover-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            var dir = MakeCaseDir("novel-cover");
             Directory.CreateDirectory(dir);
             try
             {
