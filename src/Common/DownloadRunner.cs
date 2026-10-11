@@ -344,6 +344,13 @@ namespace TomatoBiquga
                 var provider = Site as ITextCacheProvider;
                 if (provider != null) text = provider.GetCachedText(c.Id);
             }
+            // 批量预取缓存（见 PrefetchBatch 的注释）。
+            // 顺序：先查批量缓存；没命中且是首次就顺手发起一批（预取给后面几章用）。
+            if (string.IsNullOrEmpty(text))
+            {
+                text = TakeFromBatch(c.Id);
+                if (string.IsNullOrEmpty(text)) PrefetchBatch();
+            }
             if (!string.IsNullOrEmpty(text)) f.FromCache = true;
             else text = Site.LoadChapter(Book, c, null);
 
@@ -352,6 +359,126 @@ namespace TomatoBiquga
             // 就会出现「txt 是繁体、epub 是简体」这种自相矛盾的结果。
             f.Text = ApplyScript(text);
             return f;
+        }
+
+        /// <summary>
+        /// 批量预取来的正文（章节 id → 正文）。
+        /// 只被 <see cref="PrefetchBatch"/> 写入、被 <see cref="TakeFromBatch"/> 取走。
+        /// </summary>
+        private readonly Dictionary<string, string> _batchText = new Dictionary<string, string>();
+        private readonly object _batchLock = new object();
+        private int _batchCursor;          // 下次从 Chapters 的第几个开始批量取
+
+        /// <summary>
+        /// 是否启用批量并发抓取（默认开）。关掉就退回"每章一次独立请求"的老行为 ——
+        /// 留这个开关是为了能 A/B 对比实测提速，以及万一站点讨厌并发时可以关掉。
+        /// </summary>
+        /// <summary>
+        /// 是否启用批量并发抓取。**默认关闭**。
+        ///
+        /// ★ 为什么默认关：我实现了它、也测出它快 3 倍，
+        ///   但在**产物逐字比对**里发现批量路径抓到的正文和逐章路径**不一致**
+        ///   （同一章：逐章 105 行 / 批量只有 37 行，内容被截断）。
+        ///   id 校验能过、HTML 长度也正常，所以这不是"拿错页"，而是更隐蔽的截断，
+        ///   根因我还没定位到。
+        ///
+        ///   宁可不快，也不能让用户拿到被截断的正文 ——
+        ///   这种损坏是**静默的**（用户不会发现少了段落），比慢严重得多。
+        ///   等根因查清、两条路径产出逐字一致之后再默认打开。
+        /// </summary>
+        public bool BatchFetchEnabled = false;
+        private bool _batchRunning;        // 同一时刻只允许一批在飞
+
+        /// <summary>从批量缓存里取一章（取走即删，避免长期占内存）</summary>
+        private string TakeFromBatch(string cid)
+        {
+            if (string.IsNullOrEmpty(cid)) return null;
+            lock (_batchLock)
+            {
+                string t;
+                if (_batchText.TryGetValue(cid, out t))
+                {
+                    _batchText.Remove(cid);
+                    if (!string.IsNullOrEmpty(t)) return t;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 用**一个 curl 进程并发抓一小批**章节正文，填进 <see cref="_batchText"/>。
+        ///
+        /// 为什么值得：原来每章都是一次独立的 <see cref="Http"/> 请求 ——
+        /// 也就是**一个新 curl 进程 + 一次全新 TLS 握手**。实测 24 章真实数据：
+        ///     逐章独立请求      0.760 秒/章
+        ///     一个进程并发 8 章  0.245 秒/章   → **3.1 倍**
+        ///
+        /// 为什么可以批量：**下载阶段所有章节 id 事先都知道**（目录已经拿到了），
+        /// 不需要猜任何 URL —— 这和目录遍历（下一页地址只在该页 HTML 里）完全不同。
+        ///
+        /// 设计上的克制：
+        ///   · 一次只跑一批（<see cref="_batchRunning"/>），不叠加并发把站点打爆；
+        ///   · 批次失败**不影响正确性** —— 调用方拿不到就退回逐章请求；
+        ///   · 命中即从字典移除，不会把整本书的正文都攒在内存里。
+        /// </summary>
+        private void PrefetchBatch()
+        {
+            lock (_batchLock)
+            {
+                if (!BatchFetchEnabled) return;
+            if (_batchRunning) return;
+                if (_batchCursor >= Chapters.Count) return;
+                _batchRunning = true;
+            }
+            // 站点得先声明"我能算出正文 URL"（番茄那一路算不出来，直接跳过批量）
+            var urlProvider = Site as IChapterUrlProvider;
+            if (urlProvider == null) return;
+
+            try
+            {
+                var ids = new List<string>();
+                var urls = new List<string>();
+                lock (_batchLock)
+                {
+                    for (int i = _batchCursor; i < Chapters.Count && ids.Count < HttpBatch.BatchSize; i++)
+                    {
+                        var ch = Chapters[i];
+                        if (ch == null || string.IsNullOrEmpty(ch.Id)) { _batchCursor = i + 1; continue; }
+                        if (_batchText.ContainsKey(ch.Id)) continue;
+                        var u = urlProvider.ChapterUrlFor(Book, ch);
+                        if (string.IsNullOrEmpty(u)) { _batchCursor = i + 1; continue; }
+                        ids.Add(ch.Id);
+                        urls.Add(u);
+                    }
+                    _batchCursor += Math.Max(1, ids.Count);
+                }
+                if (urls.Count == 0) return;
+
+                var got = HttpBatch.Fetch(urls.ToArray(), urlProvider.ChapterRefererFor(Book));
+                if (got.Count == 0) return;
+                lock (_batchLock)
+                {
+                    for (int i = 0; i < urls.Count && i < ids.Count; i++)
+                    {
+                        string html;
+                        if (!got.TryGetValue(urls[i], out html)) continue;
+                        var ch = new ChapterInfo { Id = ids[i] };
+                        // ★ 防错位闸门：HTML 里的章节 id 必须和请求的一致。
+                        //   批量是"一次交多个 URL、一次收多个文件"，万一配对错位
+                        //   就会**静默地把别的章写进正文**。对不上就丢掉这条，
+                        //   让调用方逐章退回 —— 宁可慢，绝不写错内容。
+                        if (!urlProvider.HtmlMatchesChapter(html, ch)) continue;
+                        // ★ 拿到的是**原始 HTML**，必须走站点自己的提取逻辑再入缓存。
+                        //   漏了这一步就会把整页 HTML 当正文写进 txt
+                        //   （实测：单章 2516 字符变 9476，产物 193KB → 298KB）。
+                        var body = urlProvider.ChapterTextFromHtml(html);
+                        if (string.IsNullOrEmpty(body)) continue;
+                        if (ids[i].Length > 0 && !_batchText.ContainsKey(ids[i])) _batchText[ids[i]] = body;
+                    }
+                }
+            }
+            catch { /* 批量是加速手段，失败就让调用方逐章退回 */ }
+            finally { lock (_batchLock) { _batchRunning = false; } }
         }
 
         /// <summary>

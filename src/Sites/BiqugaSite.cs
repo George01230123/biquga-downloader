@@ -13,7 +13,7 @@ namespace TomatoBiquga
     /// 所以这里顺着每章页面里的“下一章”链接（var kkehvov）走完整本。
     /// 正文是 base64 存在 document.writeln(qsbs.bb('...')) 里。
     /// </summary>
-    public class BiqugaSite : ISite, ITextCacheProvider, IProbeable
+    public class BiqugaSite : ISite, ITextCacheProvider, IProbeable, IChapterUrlProvider
     {
         public const string Origin = "https://www.biquga.com";
         public string Name { get { return "笔趣阁"; } }
@@ -500,6 +500,73 @@ namespace TomatoBiquga
             var cid = key.Substring(0, i);
             int page = int.Parse(key.Substring(i + 1));
             return string.Format("{0}{1}/{2}_{3}.html", Origin, dir, cid, page - 1);
+        }
+
+        // ---------------------------------------------------------- 批量抓取支持
+
+        /// <summary>
+        /// 一章正文的 URL（供 HttpBatch 批量并发抓取用）。
+        ///
+        /// 这里**能算**而不需要**猜**：下载阶段章节 id 全部已知
+        /// （目录已经拿到了），所以 URL 是确定的。
+        /// 这也是为什么批量抓取只用在下载阶段 —— 目录遍历那边
+        /// 下一页地址只写在当前页 HTML 里，算不出来。
+        /// </summary>
+        public string ChapterUrlFor(BookInfo book, ChapterInfo chapter)
+        {
+            if (chapter == null) return null;
+            var dir = BookDirOf(book);
+            return (dir == null || string.IsNullOrEmpty(chapter.Id)) ? null : UrlOf(dir, chapter.Id);
+        }
+
+        /// <summary>批量抓取时要带的 Referer（指向这本书的目录页）</summary>
+        public string ChapterRefererFor(BookInfo book)
+        {
+            var dir = BookDirOf(book);
+            return dir == null ? Origin : Origin + dir + "/";
+        }
+
+        /// <summary>从 book.Dir 里取出 /10_10333 这种目录段（兼容带/不带结尾斜杠）</summary>
+        private static string BookDirOf(BookInfo book)
+        {
+            if (book == null || string.IsNullOrEmpty(book.Dir)) return null;
+            var d = book.Dir.TrimEnd('/');
+            if (d.Length == 0) return null;
+            return d.StartsWith("/") ? d : "/" + d;
+        }
+
+        /// <summary>
+        /// 从抓下来的 HTML 里取出正文。
+        ///
+        /// **必须复用 ParseChapterHtml** —— 那是 LoadChapter 走的同一份提取逻辑
+        /// （解 base64、去标签、过滤广告行）。复用才能保证
+        /// "批量抓的正文"和"逐章抓的正文"逐字一致。
+        ///
+        /// 我第一版批量路径直接用了原始 HTML，结果把整页 HTML 写进了 txt：
+        /// 单章 2516 字符变成 9476 字符，产物从 193KB 涨到 298KB ——
+        /// 靠 A/B 对比逐章长度才发现。
+        /// </summary>
+        public string ChapterTextFromHtml(string html)
+        {
+            if (string.IsNullOrEmpty(html)) return null;
+            var p = ParseChapterHtml(html);
+            return string.IsNullOrEmpty(p.Text) ? null : p.Text;
+        }
+
+        /// <summary>
+        /// 页面里的 `shuqian(bookId,chapterId,...)` 带着**本章自己的 id**，
+        /// 拿它和请求的 id 比，就能确认"这份 HTML 确实是这一章的"。
+        ///
+        /// 这是批量抓取的**防错位闸门**：批量是"一次交多个 URL、一次收多个文件"，
+        /// 万一配对错位就会把别的章静默写进正文 —— 那比慢一点严重得多。
+        /// 所以宁可靠它挡住、退回逐章请求。
+        /// </summary>
+        public bool HtmlMatchesChapter(string html, ChapterInfo chapter)
+        {
+            if (string.IsNullOrEmpty(html) || chapter == null || string.IsNullOrEmpty(chapter.Id)) return false;
+            var m = Regex.Match(html, @"shuqian\(\s*\d+\s*,\s*(\d+)");
+            if (!m.Success) return false;          // 找不到标记 → 不敢信
+            return string.Equals(m.Groups[1].Value, chapter.Id, StringComparison.Ordinal);
         }
 
         internal static string KeyOf(string cid, int page)
