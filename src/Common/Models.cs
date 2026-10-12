@@ -111,6 +111,26 @@ namespace TomatoBiquga
         /// 拿它和请求的章节 id 比即可（实测 8/8 严格对应）。
         /// </summary>
         bool HtmlMatchesChapter(string html, ChapterInfo chapter);
+
+        /// <summary>
+        /// 这一章还有没有后续页（同一个 cid 被切成 `cid.html`、`cid_1.html`、`cid_2.html`…）。
+        ///
+        /// ★ 这是批量抓取**必须**知道的事：有些章本身是多页的，
+        ///   只抓第一页会得到一段**被截断的正文**。
+        ///   我第一版批量路径就只抓了第一页 —— 单章 2494 字符变成 879 字符，
+        ///   而且读起来"像完整内容"（首尾都正常），是最难发现的那种损坏。
+        ///
+        /// 返回下一页的 key（`cid_N`），没有下一页则返回 null。
+        /// 判定必须和逐章路径用**同一份逻辑**，否则两条路径又会不一致。
+        /// </summary>
+        string NextPageKeyOf(string html, ChapterInfo chapter);
+
+        /// <summary>
+        /// 当前页是 `cid_{curPage}` 时，后面还有没有下一页（返回下一页 key，没有则 null）。
+        /// 批量续抓循环用它**逐页推进** —— 每次从当前页码往后找，
+        /// 而不是每次重新从第 1 页找（那样三页的章节只拼得到两页）。
+        /// </summary>
+        string NextPageKeyAfter(string html, string cid, int curPage);
     }
 
     /// <summary>

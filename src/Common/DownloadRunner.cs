@@ -456,25 +456,57 @@ namespace TomatoBiquga
 
                 var got = HttpBatch.Fetch(urls.ToArray(), urlProvider.ChapterRefererFor(Book));
                 if (got.Count == 0) return;
+
+                var referer = urlProvider.ChapterRefererFor(Book);
+                var filled = new Dictionary<string, string>();
+
+                for (int i = 0; i < urls.Count && i < ids.Count; i++)
+                {
+                    string html;
+                    if (!got.TryGetValue(urls[i], out html)) continue;
+                    var ch = new ChapterInfo { Id = ids[i] };
+                    // ★ 防错位闸门：HTML 里的章节 id 必须和请求的一致。
+                    //   批量是"一次交多个 URL、一次收多个文件"，万一配对错位
+                    //   就会**静默地把别的章写进正文**。对不上就丢掉这条，
+                    //   让调用方逐章退回 —— 宁可慢，绝不写错内容。
+                    if (!urlProvider.HtmlMatchesChapter(html, ch)) continue;
+
+                    var parts = new List<string>();
+                    var first = urlProvider.ChapterTextFromHtml(html);
+                    if (!string.IsNullOrEmpty(first)) parts.Add(first);
+
+                    // ★ 多页章节：有些章被切成 cid.html / cid_1.html / cid_2.html…
+                    //   只抓第一页会得到**被静默截断的正文**（实测 2494 字符只剩 879）。
+                    //   这里按"逐页推进"续抓，和站点 FetchChapterText 的循环形状一致：
+                    //   每取回一页都再问一次"后面还有没有下一页"，直到没有为止。
+                    var nextKey = urlProvider.NextPageKeyOf(html, ch);
+                    for (int guard = 0; nextKey != null && guard < 29; guard++)
+                    {
+                        var pageCh = new ChapterInfo { Id = nextKey };
+                        var pageUrl = urlProvider.ChapterUrlFor(Book, pageCh);
+                        if (string.IsNullOrEmpty(pageUrl)) break;
+                        string pageHtml = null;
+                        try { pageHtml = Http.Get(pageUrl, referer); } catch { }
+                        if (string.IsNullOrEmpty(pageHtml)) break;
+                        var pt = urlProvider.ChapterTextFromHtml(pageHtml);
+                        if (!string.IsNullOrEmpty(pt)) parts.Add(pt);
+                        // 从"当前页码 + 1"继续往后找，而不是每次重新从 1 找 ——
+                        // 否则三页的章节只拼得到两页
+                        int curPage = 0;
+                        int us = nextKey.LastIndexOf('_');
+                        if (us >= 0) int.TryParse(nextKey.Substring(us + 1), out curPage);
+                        nextKey = urlProvider.NextPageKeyAfter(pageHtml, ids[i], curPage);
+                    }
+
+                    if (parts.Count == 0) continue;
+                    filled[ids[i]] = string.Join("\n\n", parts.ToArray()).Trim();
+                }
+
+                if (filled.Count == 0) return;
                 lock (_batchLock)
                 {
-                    for (int i = 0; i < urls.Count && i < ids.Count; i++)
-                    {
-                        string html;
-                        if (!got.TryGetValue(urls[i], out html)) continue;
-                        var ch = new ChapterInfo { Id = ids[i] };
-                        // ★ 防错位闸门：HTML 里的章节 id 必须和请求的一致。
-                        //   批量是"一次交多个 URL、一次收多个文件"，万一配对错位
-                        //   就会**静默地把别的章写进正文**。对不上就丢掉这条，
-                        //   让调用方逐章退回 —— 宁可慢，绝不写错内容。
-                        if (!urlProvider.HtmlMatchesChapter(html, ch)) continue;
-                        // ★ 拿到的是**原始 HTML**，必须走站点自己的提取逻辑再入缓存。
-                        //   漏了这一步就会把整页 HTML 当正文写进 txt
-                        //   （实测：单章 2516 字符变 9476，产物 193KB → 298KB）。
-                        var body = urlProvider.ChapterTextFromHtml(html);
-                        if (string.IsNullOrEmpty(body)) continue;
-                        if (ids[i].Length > 0 && !_batchText.ContainsKey(ids[i])) _batchText[ids[i]] = body;
-                    }
+                    foreach (var kv in filled)
+                        if (!_batchText.ContainsKey(kv.Key)) _batchText[kv.Key] = kv.Value;
                 }
             }
             catch { /* 批量是加速手段，失败就让调用方逐章退回 */ }

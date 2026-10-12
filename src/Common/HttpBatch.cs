@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -164,8 +164,8 @@ namespace TomatoBiquga
                 // ★ 必须先读 stdout 再 WaitForExit：反过来的话输出量大时管道写满会死锁
                 string stdout = p.StandardOutput.ReadToEnd();
                 p.StandardError.ReadToEnd();
-                // 一批最多 MaxParallel 个，每个按超时上限算，再留余量
-                int waitMs = (Http.TimeoutSeconds * ((urlsPerBatch(args) / MaxParallel) + 2) + 20) * 1000;
+                // 一批是"一个进程按顺序发 N 个请求"，所以最坏耗时 = N × 单页超时，再留余量
+                int waitMs = (Http.TimeoutSeconds * (urlsPerBatch(args) + 2) + 20) * 1000;
                 if (!p.WaitForExit(waitMs))
                 {
                     try { p.Kill(); } catch { }

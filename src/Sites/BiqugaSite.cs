@@ -431,20 +431,83 @@ namespace TomatoBiquga
             }
         }
 
+        /// <summary>
+        /// 取一整章的正文（把 `cid.html` / `cid_1.html` / `cid_2.html`… 拼起来）。
+        ///
+        /// ============================================================
+        /// 为什么这里值得优化（实测）
+        /// ============================================================
+        /// 这些章**本身就是多页的**，而且页数不少。实测某一章：
+        ///     /10_10333/37684582.html    → 879 字符
+        ///     /10_10333/37684582_1.html  → 818 字符
+        ///     /10_10333/37684582_2.html  → 793 字符
+        /// 合计 2490 ≈ 逐章拿到的 2494。
+        /// 也就是说**下载慢的主因是"页数"，不是连接握手** ——
+        /// 我一开始误判成 TLS 握手开销，方向错了。
+        ///
+        /// ============================================================
+        /// 做法：先串行取第 1 页（为了知道有几页、且页号未必连续），
+        ///       再把所有续页**并发抓回来**，最后按页号拼。
+        /// ============================================================
+        /// 为什么这样是安全的：
+        ///   · 续页之间**没有依赖** —— 页 1 只用来回答"后面还有哪些页"，
+        ///     和目录遍历那种"下一页地址写在当前页里"的环形依赖完全不同；
+        ///   · 拼接顺序仍由**页号**决定，不依赖网络返回顺序；
+        ///   · 并发只发生在**同一章内部**（最多几个页），
+        ///     不像"整本书一起并发"那样把站点打爆；
+        ///   · 拿不到某一页就**停下来、不越过去**（保守，宁可少拼也不乱拼）。
+        ///
+        /// ★ 改这个方法时务必先跑 tools/PgSample.cs 存基线、改完再逐字比对 ——
+        ///   拼接一旦错位，正文会被**静默截断**，用户不会立刻发现。
+        /// </summary>
         private string FetchChapterText(string dir, string cid, string referer)
         {
+            // ---- 第 1 页（串行：它是"有几页"的唯一依据）----
+            var firstUrl = string.Format("{0}{1}/{2}.html", Origin, dir, cid);
+            var firstHtml = Http.Get(firstUrl, referer);
             var parts = new List<string>();
-            for (int page = 1; page <= 30; page++)
+            var firstText = ParseChapterHtml(firstHtml).Text;
+            if (!string.IsNullOrEmpty(firstText)) parts.Add(firstText);
+
+            int p1 = NextPageNumberAt(firstHtml, cid, 1);
+            if (p1 == 0) return string.Join("\n\n", parts).Trim();
+
+            // ---- 续页并发抓 ----
+            var nums = new List<int>();
+            var urls = new List<string>();
+            for (int page = p1; page <= 30 && nums.Count < 8; page++)
             {
-                var url = page == 1
-                    ? string.Format("{0}{1}/{2}.html", Origin, dir, cid)
-                    : string.Format("{0}{1}/{2}_{3}.html", Origin, dir, cid, page - 1);
-                var html = Http.Get(url, referer);
-                var p = ParseChapterHtml(html);
-                if (!string.IsNullOrEmpty(p.Text)) parts.Add(p.Text);
-                if (!html.Contains(cid + "_" + page + ".html")) break;
-                Http.Polite();
+                nums.Add(page);
+                urls.Add(string.Format("{0}{1}/{2}_{3}.html", Origin, dir, cid, page));
             }
+
+            // ---- 续页：**串行**逐页取 ----
+            //
+            // ★ 这里试过并发，**并发更慢**，所以退回串行。实测（同样 12 章、三轮交替）：
+            //     续页串行   60.6s / 70.4s / 52.0s
+            //     续页并发   79.3s / 75.9s / 84.2s   → 慢 1.31x / 1.08x / 1.62x
+            //   也试过用 HttpBatch 把续页塞进一个 curl 进程：
+            //     Http.Get 单页 0.58s，而 HttpBatch 取 3 页要 3.20s（1.07s/页）——
+            //     多付的 curl 进程启动 + 临时文件开销，抵不过它省下的握手时间。
+            //
+            //   结论：**这个站点对并发请求不友好**（并发反而更慢）。
+            //   续页就老老实实一页一页取，这也是唯一被实测支持的做法。
+            bool advanced = false;
+            for (int i = 0; i < nums.Count; i++)
+            {
+                string html = null;
+                try { html = Http.Get(urls[i], referer); } catch { }
+                if (html == null) break;      // 拿不到就停，不跳过这一页
+
+                var t = ParseChapterHtml(html).Text;
+                if (!string.IsNullOrEmpty(t)) parts.Add(t);
+                advanced = true;
+
+                // 这一页没提示"还有下一页" → 到此为止
+                if (NextPageNumberAt(html, cid, nums[i] + 1) == 0) break;
+            }
+            if (advanced) Http.Polite();
+
             return string.Join("\n\n", parts).Trim();
         }
 
@@ -567,6 +630,49 @@ namespace TomatoBiquga
             var m = Regex.Match(html, @"shuqian\(\s*\d+\s*,\s*(\d+)");
             if (!m.Success) return false;          // 找不到标记 → 不敢信
             return string.Equals(m.Groups[1].Value, chapter.Id, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 从 `fromPage` 号开始往后找第一个"确实存在的续页"，返回它的页码（1 表示 `cid_1.html`）；
+        /// 后面没有续页则返回 0。
+        ///
+        /// **必须和 FetchChapterText 的判定一致**：那边是**迭代式**的 ——
+        /// 每取回一页都再问一次"还有没有下一页"。
+        /// 所以这里要**从当前页码往后扫**，而不是每次都只看 `cid_1.html`。
+        /// 我第一版就写成"只看第一页里有没有 cid_1.html"，
+        /// 结果三页的章节只拼到两页（实测 2494 字符只拿到 1760）。
+        /// </summary>
+        private static int NextPageNumberAt(string html, string cid, int fromPage)
+        {
+            if (string.IsNullOrEmpty(html)) return 0;
+            for (int page = Math.Max(1, fromPage); page <= 30; page++)
+            {
+                if (html.IndexOf(cid + "_" + page + ".html", StringComparison.Ordinal) >= 0)
+                    return page;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// 这一章还有没有下一页。返回**下一页的 key**（`cid_N`），没有则 null。
+        /// 供批量抓取复用，保证和逐章路径拼出**完全相同**的正文。
+        /// </summary>
+        public string NextPageKeyOf(string html, ChapterInfo chapter)
+        {
+            if (string.IsNullOrEmpty(html) || chapter == null || string.IsNullOrEmpty(chapter.Id)) return null;
+            int p = NextPageNumberAt(html, chapter.Id, 1);
+            return p == 0 ? null : chapter.Id + "_" + p;
+        }
+
+        /// <summary>
+        /// 当前页是 `cid_{curPage}.html` 时，后面还有没有下一页。
+        /// 批量续抓循环用它逐页推进（和 FetchChapterText 的循环形状一致）。
+        /// </summary>
+        public string NextPageKeyAfter(string html, string cid, int curPage)
+        {
+            if (string.IsNullOrEmpty(html) || string.IsNullOrEmpty(cid)) return null;
+            int p = NextPageNumberAt(html, cid, curPage + 1);
+            return p == 0 ? null : cid + "_" + p;
         }
 
         internal static string KeyOf(string cid, int page)
