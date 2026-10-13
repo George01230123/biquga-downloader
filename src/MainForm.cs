@@ -580,7 +580,72 @@ namespace TomatoBiquga
                     Log("番茄：核心已就绪" + (bundled ? "（本工具自带，自包含）" : "（外部工具）") +
                         "：" + core.ExePath);
                 Log("提示：番茄的搜索用「浏览器搜索」，下载用「用第三方工具下载」，在第三行。");
+
+                // 版本检测：放到后台线程，**绝不阻塞界面启动** ——
+                // 这个查询要走 GitHub，国内经常要好几秒甚至超时，
+                // 放在主线程会让窗口卡住不出。
+                if (core.ExePath != null)
+                {
+                    var exeForCheck = core.ExePath;
+                    var th = new System.Threading.Thread(delegate() { CheckFanqieVersion(exeForCheck); });
+                    th.IsBackground = true;
+                    th.Start();
+                }
             }
+        }
+
+        /// <summary>
+        /// 检查番茄核心是不是旧版，旧了就提示一次。
+        ///
+        /// 设计上的克制：
+        ///   · **只提示，不自动下载、不自动替换** —— 这是本项目的既有约定
+        ///     （见 docs/网络健壮性与书架.md：明确不做自动更新），
+        ///     而且替换一个正在用的 exe 风险太高。给个发布页链接让用户自己决定。
+        ///   · 联网查不到就退回内置的 <see cref="TomatoCore.KnownLatestVersion"/>，
+        ///     所以**断网也能告诉你手上这份是不是旧的**。
+        ///   · 在后台线程跑，查询超时也不影响主界面。
+        /// </summary>
+        private void CheckFanqieVersion(string exePath)
+        {
+            try
+            {
+                var local = TomatoCore.VersionOf(exePath);
+                var latest = TomatoCore.QueryLatestVersion(6);
+                bool fromNet = !string.IsNullOrEmpty(latest);
+                if (!fromNet) latest = TomatoCore.KnownLatestVersion;
+
+                if (local == null)
+                {
+                    SafeLog("番茄：读不出核心版本号（" + System.IO.Path.GetFileName(exePath) + "）。");
+                    return;
+                }
+                if (!TomatoCore.IsNewer(latest, local))
+                {
+                    SafeLog("番茄：核心版本 v" + local + " 已是最新。");
+                    return;
+                }
+
+                SafeLog("番茄：核心 v" + local + " 已过时，最新是 v" + latest +
+                        (fromNet ? "" : "（内置信息，未联网核对）") + "。");
+                SafeLog("      新版有：Web UI 模式（--server）、自更新、短链接解析、IID 网络诊断等。");
+                SafeLog("      下载页：" + TomatoCore.ReleasePage);
+                SafeLog("      换法：下载后点「设置官方工具路径」选新的 exe（会复制进工具目录）。");
+            }
+            catch (Exception ex)
+            {
+                SafeLog("番茄：版本检测失败（" + ex.Message + "），不影响使用。");
+            }
+        }
+
+        /// <summary>给后台线程用的日志（切回 UI 线程，避免跨线程改控件）</summary>
+        private void SafeLog(string msg)
+        {
+            try
+            {
+                if (IsHandleCreated && InvokeRequired) BeginInvoke(new Action<string>(SafeLog), msg);
+                else Log(msg);
+            }
+            catch { }
         }
 
         // ------------------------------------------------------------ 交互

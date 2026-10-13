@@ -166,7 +166,21 @@ namespace TomatoBiquga
         /// </summary>
         internal static int Run(string[] args)
         {
-            Console.OutputEncoding = new UTF8Encoding(false);
+            // ★ 这一行**必须**包 try —— 而且曾经因为没包而出事。
+            //
+            //   GUI 子系统（winexe）的进程默认没有控制台；输出被重定向时同样没有。
+            //   这种情况下 `Console.set_OutputEncoding` 会抛 IOException（"句柄无效"），
+            //   而它在 Run 的第一行、Main 又没有 catch，于是**整个测试进程直接崩掉**：
+            //   退出码 1 + 一句 `System.IO.IOException: 句柄无效` 的栈。
+            //
+            //   实测场景：`小说下载器.exe --selftest` 在重定向输出时必崩，
+            //   而 CI 的护栏恰恰就是**重定向着跑**它 —— 也就是说这一步本来就该拦住，
+            //   却因为异常出在 Main 之上、CI 只看了退出码而漏过。
+            //
+            //   Program.cs 里同样的调用是包了 try 的（AttachConsole 之后），这里漏了。
+            //   把编码设置当作"尽力而为"：设不上就按默认编码输出，测试本身照跑。
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+
             _pass = 0;
             _fail = 0;
             Failures.Clear();
@@ -2377,6 +2391,29 @@ namespace TomatoBiquga
 
             Check("版本：当前版本号非空", !string.IsNullOrEmpty(UpdateChecker.CurrentVersionText));
             Check("版本：发布页地址可用", UpdateChecker.ReleasesPage.StartsWith("https://github.com/"));
+
+            // ---- 番茄核心（第三方工具）自己的版本检测 ----
+            //
+            // 为什么单测这个：番茄核心是**外部 exe**，它的版本号只能从 PE 版本资源
+            // 读出来。读错了不算灾难，但"该提示时不提示"会让人一直用旧版，
+            // 而"不该提示时乱提示"会让人再也不信提示 —— 两头都得钉住。
+            Check("番茄版本：不存在的文件返回 null", TomatoCore.VersionOf("C:\\definitely\\not\\here.exe") == null);
+            Check("番茄版本：null 返回 null", TomatoCore.VersionOf(null) == null);
+            Check("番茄版本：空串返回 null", TomatoCore.VersionOf("") == null);
+
+            // 内置兜底版本必须能被解析，否则断网时会静默失效（什么都不提示）
+            Check("番茄版本：内置兜底版本可解析",
+                !string.IsNullOrEmpty(UpdateChecker.Normalize(TomatoCore.KnownLatestVersion)));
+            Check("番茄版本：发布页指向该工具的仓库",
+                TomatoCore.ReleasePage.StartsWith("https://github.com/zhongbai2333/"));
+
+            Check("番茄版本：新版比旧版新", TomatoCore.IsNewer("2.4.15", "2.3.2"));
+            Check("番茄版本：旧版不比新版新", !TomatoCore.IsNewer("2.3.2", "2.4.15"));
+            Check("番茄版本：相同版本不提示", !TomatoCore.IsNewer("2.4.15", "2.4.15"));
+            Check("番茄版本：2.10 比 2.9 新（防字符串比较）", TomatoCore.IsNewer("2.10.0", "2.9.0"));
+            Check("番茄版本：2.9 不比 2.10 新", !TomatoCore.IsNewer("2.9.0", "2.10.0"));
+            Check("番茄版本：远程为空时不提示", !TomatoCore.IsNewer("", "2.4.15"));
+            Check("番茄版本：本地读不出时提示一次", TomatoCore.IsNewer("2.4.15", ""));
 
             // 从 GitHub 的 JSON 里取字段
             var json = "{\"tag_name\":\"v1.2.3\",\"body\":\"修了几个 bug\",\"html_url\":\"https://x/y\"}";

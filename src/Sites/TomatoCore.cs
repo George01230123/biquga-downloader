@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -118,6 +119,79 @@ namespace TomatoBiquga
                 catch { }
             }
             return null;
+        }
+
+        // ---------------------------------------------------------------- 版本检测
+
+        /// <summary>
+        /// 已知的最新版本（内置，作为"联网查不到"时的兜底）。
+        ///
+        /// 为什么要兜底：这个工具的更新地址和 GitHub 在国内经常连不上，
+        /// 如果只在联网成功时才提示，用户就永远看不到提示了。
+        /// 内置一个常量至少能回答"你手上这份是不是旧的"。
+        ///
+        /// ★ 更新这里的方式：看到新版发布就改这个字符串。
+        /// </summary>
+        public const string KnownLatestVersion = "2.4.15";
+
+        /// <summary>从 exe 里读出它的版本号。读不出返回 null（不瞎猜）。</summary>
+        public static string VersionOf(string exePath)
+        {
+            if (string.IsNullOrEmpty(exePath)) return null;
+            try
+            {
+                if (!File.Exists(exePath)) return null;
+
+                // 首选 PE 版本资源（最可靠）
+                var fv = FileVersionInfo.GetVersionInfo(exePath).FileVersion;
+                if (!string.IsNullOrEmpty(fv) && Regex.IsMatch(fv, @"\d+\.\d+"))
+                    return Regex.Match(fv, @"\d+(\.\d+)+").Value;
+
+                // 退一步：从文件名里抠（发布名是 TomatoNovelDownloader-Win64-v2.4.15.exe）
+                var name = Path.GetFileName(exePath);
+                var m = Regex.Match(name, @"[vV]?(\d+\.\d+(?:\.\d+)*)");
+                return m.Success ? m.Groups[1].Value : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>官方发布页（给用户点过去下载用）</summary>
+        public const string ReleasePage = "https://github.com/zhongbai2333/Tomato-Novel-Downloader/releases/latest";
+
+        /// <summary>
+        /// 联网查最新版本号。查不到返回 null（调用方应退回 <see cref="KnownLatestVersion"/>）。
+        /// 只读 GitHub 的公开 releases 接口，**不做任何自动下载/自动替换**。
+        /// </summary>
+        public static string QueryLatestVersion(int timeoutSeconds)
+        {
+            try
+            {
+                var json = Http.GetWithTimeout(
+                    "https://api.github.com/repos/zhongbai2333/Tomato-Novel-Downloader/releases/latest",
+                    timeoutSeconds);
+                if (string.IsNullOrEmpty(json)) return null;
+
+                // 复用自带更新那套 JSON 取值，不引第二个实现
+                var tag = UpdateChecker.JsonStr(json, "tag_name");
+                if (string.IsNullOrEmpty(tag)) return null;
+                var v = UpdateChecker.Normalize(tag);
+                return string.IsNullOrEmpty(v) ? null : v;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// remote 是否比 local 新。
+        ///
+        /// ★ 复用 <see cref="UpdateChecker.CompareVersions"/>，**不在这里另写一套** ——
+        ///   版本比较是最容易"看着对其实错"的地方（"2.10" 按字符串比会小于 "2.9"），
+        ///   项目里已经有一份经过测试的实现；两份实现迟早会不一致。
+        /// </summary>
+        public static bool IsNewer(string remote, string local)
+        {
+            if (string.IsNullOrEmpty(remote)) return false;
+            if (string.IsNullOrEmpty(local)) return true;      // 本地读不出 → 当作需要更新，提示一下无妨
+            return UpdateChecker.CompareVersions(remote, local) > 0;
         }
 
         /// <summary>
