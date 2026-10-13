@@ -1,4 +1,4 @@
-﻿name: ci
+name: ci
 
 on:
   push:
@@ -121,7 +121,17 @@ jobs:
         run: |
           $exe = 'dist/NovelDownloader.exe'
           if (-not (Test-Path $exe)) { throw "找不到 $exe" }
-          $p = Start-Process -FilePath $exe -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru `
+          # ★ 必须在**独立的工作目录**里跑，不能在 dist/ 里跑。
+          #
+          #   自测会在 exe 所在目录写运行时文件（cache\、搜索索引.json 之类）——
+          #   在 dist/ 里跑就会把这些垃圾留在 dist，而下一步 Package 会把它们打进发布包。
+          #   实测 v1.4.3 的发布包里就混进了 cache\ 和 搜索索引.json。
+          #   用一个干净的空目录当工作目录，dist 就保持"只有编译产物"。
+          $work = Join-Path $env:RUNNER_TEMP 'selftest-run'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $exeAbs = (Resolve-Path $exe).Path
+          $p = Start-Process -FilePath $exeAbs -ArgumentList '--selftest' -NoNewWindow -Wait -PassThru `
+                 -WorkingDirectory $work `
                  -RedirectStandardOutput 'selftest-out.txt' -RedirectStandardError 'selftest-err.txt'
           Get-Content selftest-out.txt -Tail 4
           if ((Test-Path selftest-err.txt) -and (Get-Item selftest-err.txt).Length -gt 0) {
@@ -133,6 +143,9 @@ jobs:
           $out = Get-Content selftest-out.txt -Raw
           if ($out -notmatch '通过 \d+/\d+') { throw "stdout 里没有测试结果，说明 --selftest 没接上" }
           Write-Host '--selftest 在主程序里工作正常'
+          # 保险：确认自测没有把运行时垃圾落在 dist（谁把工作目录改回去，这里立刻红）
+          $junk = Get-ChildItem dist -Force -Directory | Where-Object { $_.Name -ne '.gitkeep' }
+          if ($junk) { throw "dist 里出现了目录：$($junk.Name -join ', ') —— 自测大概又被放回 dist 里跑了" }
 
       - name: Package
         shell: pwsh
@@ -141,14 +154,25 @@ jobs:
           # dotnet 编出来的是 ASCII 名，打包时改成中文名 —— start.bat / start.ps1 找的就是它
           Move-Item dist/NovelDownloader.exe 'pkg/小说下载器.exe' -Force
           Copy-Item README.md, NOTICE.md, LICENSE, start.bat, start.ps1 pkg/
+          # ★ 白名单打包，而不是 `pkg/*` ——
+          #   通配会把"碰巧落进 pkg 的任何东西"一起发出去（v1.4.3 就是这样混进 cache\ 的）。
+          #   先检查 pkg 里没有计划外的文件，再按名单逐个压。
+          $pkgList = @('小说下载器.exe', 'README.md', 'NOTICE.md', 'LICENSE', 'start.bat', 'start.ps1')
+          $stray = (Get-ChildItem pkg -Force | Select-Object -ExpandProperty Name) |
+                   Where-Object { $pkgList -notcontains $_ }
+          if ($stray) { throw ("pkg 里有计划外的文件：" + ($stray -join ', ')) }
           $zip = "novel-downloader-${{ github.ref_name }}-win64.zip"
-          Compress-Archive -Path pkg/* -DestinationPath $zip -Force
+          Compress-Archive -Path ($pkgList | ForEach-Object { Join-Path 'pkg' $_ }) -DestinationPath $zip -Force
 
           # 排障包：多带三个自测程序，下载出问题时用来定位（普通用户不需要）
           New-Item -ItemType Directory -Force pkg-selftest | Out-Null
           Copy-Item 'pkg/小说下载器.exe', dist/_offlinetests.exe, dist/_e2e.exe, dist/_liveprobe.exe pkg-selftest/
+          $pkg2List = @('小说下载器.exe', '_offlinetests.exe', '_e2e.exe', '_liveprobe.exe')
+          $stray2 = (Get-ChildItem pkg-selftest -Force | Select-Object -ExpandProperty Name) |
+                    Where-Object { $pkg2List -notcontains $_ }
+          if ($stray2) { throw ("pkg-selftest 里有计划外的文件：" + ($stray2 -join ', ')) }
           $zip2 = "novel-downloader-${{ github.ref_name }}-win64-selftest.zip"
-          Compress-Archive -Path pkg-selftest/* -DestinationPath $zip2 -Force
+          Compress-Archive -Path ($pkg2List | ForEach-Object { Join-Path 'pkg-selftest' $_ }) -DestinationPath $zip2 -Force
 
           Get-ChildItem pkg, pkg-selftest | Select-Object Name, Length
           Get-Item $zip, $zip2 | Select-Object Name, Length
@@ -162,7 +186,9 @@ jobs:
           $tmp = Join-Path $env:RUNNER_TEMP 'verify'
           Expand-Archive -Path $zip -DestinationPath $tmp -Force
           $expect = @('LICENSE', 'NOTICE.md', 'README.md', 'start.bat', 'start.ps1', '小说下载器.exe')
-          $got = (Get-ChildItem $tmp | Select-Object -ExpandProperty Name) | Sort-Object
+          # ★ 必须 -Force：不加的话**目录**不会出现在列表里 ——
+          #   v1.4.3 就是这样把 `cache\`（一个目录）放过去的，这一步当时是绿的。
+          $got = (Get-ChildItem $tmp -Force | Select-Object -ExpandProperty Name) | Sort-Object
           Write-Host ("包内文件：" + ($got -join ', '))
           $missing = $expect | Where-Object { $got -notcontains $_ }
           $extra = $got | Where-Object { $expect -notcontains $_ }
