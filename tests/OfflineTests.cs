@@ -278,6 +278,8 @@ namespace TomatoBiquga
                 TestQueuePersistence(work);
                 // 目录遍历断点续爬
                 TestCrawlResume();
+                // 增量：已下载的章节重下时不再联网
+                TestIncrementalSkip(work);
                 // AI 裁决错字（纯函数部分）
                 TestAiAdjudicator();
                 // 配置项往返
@@ -1457,6 +1459,102 @@ namespace TomatoBiquga
                     || File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "curl.exe"));
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// 增量：文件里已经有正文的章节，重复下载时**既不该联网、也不该把文件写大**。
+        ///
+        /// 为什么单测这个：在这条修正之前，`_existing`（已有文件里的章节索引）
+        /// 只被用来决定"新章节插到哪个位置"，**从来没用来跳过已下载的章节**。
+        /// 结果它是"补齐"而不是"增量" —— 实测同一本 12 章连下两次，
+        /// 第二轮仍然跑满 78.6 秒（第一轮 94.4 秒），只快 17% 而不是接近 0。
+        ///
+        /// 这里有两个独立断言，缺一不可：
+        ///   ① 联网次数 = 0   → 证明真的跳过了（省了网络）
+        ///   ② 文件没变大     → 证明没有重复追加（省了写盘，也不会把文件写重复）
+        /// 只测 ① 会漏掉"跳过了但还是写了一遍"这种情况。
+        /// </summary>
+        private static void TestIncrementalSkip(string work)
+        {
+            var dir = Path.Combine(work, "incr");
+            Directory.CreateDirectory(dir);
+
+            var book = new BookInfo { Site = "fake", Title = "增量测试", Author = "作者", Dir = "/1_2/", Url = "u" };
+            var chapters = new List<ChapterInfo>();
+            for (int i = 1; i <= 8; i++)
+                chapters.Add(new ChapterInfo { Id = "ic" + (2000 + i), Title = "第" + i + "章", Order = i });
+
+            var site = new CountingSite();
+            var runner = new DownloadRunner
+            {
+                Site = site,
+                Book = book,
+                Chapters = chapters,
+                RootDir = dir,
+                Workers = 1,
+                RetryPasses = 0,
+                AppendToExistingFile = true,
+                Log = delegate { },
+            };
+
+            // ---- 第一轮：全新下载，全部走网络 ----
+            runner.Run();
+            Eq("增量：首轮全部联网下载", 8, site.LoadCalls);
+            Eq("增量：首轮成功 8 章", 8, runner.Ok);
+            Eq("增量：首轮没有已下载过的", 0, runner.SkippedDownloaded);
+
+            long sizeAfterFirst = new FileInfo(runner.OutputFile).Length;
+            site.LoadCalls = 0;
+
+            // ---- 第二轮：同一本书重下，应当一章都不联网 ----
+            var runner2 = new DownloadRunner
+            {
+                Site = site,
+                Book = book,
+                Chapters = chapters,
+                RootDir = dir,
+                Workers = 1,
+                RetryPasses = 0,
+                AppendToExistingFile = true,
+                Log = delegate { },
+            };
+            runner2.Run();
+
+            Eq("增量：重下时不再联网", 0, site.LoadCalls);
+            Eq("增量：8 章全部识别为已下载", 8, runner2.SkippedDownloaded);
+            Eq("增量：重下时成功数为 0（没有重新抓）", 0, runner2.Ok);
+            Eq("增量：文件没有被写大",
+                sizeAfterFirst, new FileInfo(runner2.OutputFile).Length);
+
+            // 每一章在文件里只应出现一次 —— 重复追加会让阅读器里出现重复章节。
+            // 这里刻意用普通字符串计数而不是正则：锚点里含 `<!--` 这类正则元字符，
+            // 写成正则既要转义又容易写错，而"数出现几次"根本不需要正则。
+            var text = File.ReadAllText(runner2.OutputFile, Encoding.UTF8);
+            foreach (var c in chapters)
+            {
+                var anchor = "<!--c:" + c.Id + "-->";
+                int n = 0, at = 0;
+                while ((at = text.IndexOf(anchor, at, StringComparison.Ordinal)) >= 0) { n++; at += anchor.Length; }
+                Eq("增量：" + c.Title + " 只出现一次锚点", 1, n);
+            }
+        }
+
+        /// <summary>数 LoadChapter 被调用了几次（用来证明"跳过了联网"）</summary>
+        private class CountingSite : ISite
+        {
+            public int LoadCalls;
+            public string Name { get { return "counting"; } }
+            public List<BookInfo> Search(string keyword, Action<string> log) { return new List<BookInfo>(); }
+            public BookInfo LoadBook(BookInfo item, Action<string> log) { return item; }
+            public string LoadChapter(BookInfo book, ChapterInfo chapter, Action<string> log)
+            {
+                LoadCalls++;
+                var sb = new StringBuilder();
+                for (int i = 0; i < 6; i++)
+                    sb.Append("这是 ").Append(chapter.Title).Append(" 的第 ").Append(i + 1)
+                      .Append(" 段正文内容，用来让长度超过 40 字的门槛。\n");
+                return sb.ToString();
+            }
         }
 
         /// <summary>假的站点：直接返回造好的正文，不联网（用来测下载流程本身）</summary>
