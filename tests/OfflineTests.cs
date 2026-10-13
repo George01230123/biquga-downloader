@@ -280,6 +280,10 @@ namespace TomatoBiquga
                 TestCrawlResume();
                 // 增量：已下载的章节重下时不再联网
                 TestIncrementalSkip(work);
+                // 本地搜索索引（归一化 / 模糊匹配 / 关键词缓存）
+                TestSearchIndex();
+                // 两条编译路径的源码清单必须一致（v1.4.0 事故的护栏）
+                TestBuildManifestConsistency();
                 // AI 裁决错字（纯函数部分）
                 TestAiAdjudicator();
                 // 配置项往返
@@ -1555,6 +1559,169 @@ namespace TomatoBiquga
                       .Append(" 段正文内容，用来让长度超过 40 字的门槛。\n");
                 return sb.ToString();
             }
+        }
+
+        /// <summary>
+        /// 两条编译路径的**源码清单必须一致**。
+        ///
+        /// 为什么单测这个：v1.4.0 出过一次事故 ——
+        /// `build.bat`（本机 csc）和 `build/NovelDownloader.csproj`（CI 的 dotnet build）
+        /// 是**两份独立的编译清单**，加 `--selftest` 时只改了一份，
+        /// 结果本机编出来能用、**CI 编出来的是残废版**，而 CI 全绿、没有任何地方报错。
+        ///
+        /// 更要命的是两者的**机制还不一样**（这轮才发现）：
+        ///   · csproj 用通配符 `..\src\Common\*.cs` —— 新增文件自动被包含
+        ///   · build.bat 是**逐个枚举** —— 新增文件必须手动加，漏了就静默缺失
+        ///
+        /// 所以这里把两边实际会编到的文件算出来对比，差集不为空就红。
+        /// 找不到仓库根目录时（发布包解压运行）跳过 —— 那时没有源码可比，跳过是设计如此。
+        /// </summary>
+        private static void TestBuildManifestConsistency()
+        {
+            var root = FindRepoRoot();
+            if (root == null)
+            {
+                Check("编译清单：无源码目录时跳过（发布包场景）", true);
+                return;
+            }
+
+            var batPath = Path.Combine(root, "build.bat");
+            Check("编译清单：build.bat 存在", File.Exists(batPath));
+            if (!File.Exists(batPath)) return;
+
+            // ---- build.bat 的显式清单 ----
+            var batCommon = new List<string>();
+            foreach (var line in File.ReadAllLines(batPath, Encoding.ASCII))
+            {
+                if (!line.StartsWith("set COMMON=") && !line.StartsWith("set SITES=")) continue;
+                var v = line.Substring(line.IndexOf('=') + 1);
+                foreach (var tok in v.Split(' '))
+                {
+                    var t = tok.Trim();
+                    if (t.Length == 0 || !t.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+                    var norm = t.Replace('/', '\\');
+                    // 只比 Common（SITES 在 csproj 里是另一个通配符，另行覆盖）
+                    if (norm.StartsWith("src\\Common\\", StringComparison.OrdinalIgnoreCase)) batCommon.Add(norm);
+                }
+            }
+            Check("编译清单：从 build.bat 解析到 Common 源码", batCommon.Count > 10);
+
+            // ---- csproj 的通配符实际会展开出什么 ----
+            var csCommon = new List<string>();
+            var csprojPath = Path.Combine(root, "build", "NovelDownloader.csproj");
+            if (File.Exists(csprojPath))
+            {
+                foreach (var csprojLine in File.ReadAllLines(csprojPath, Encoding.UTF8))
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(csprojLine, @"Include=""([^""]*Common\\\*\.cs)""");
+                    if (!m.Success) continue;
+                    var dirPart = "src\\Common";
+                    var full = Path.Combine(root, "src", "Common");
+                    if (!Directory.Exists(full)) continue;
+                    foreach (var f in Directory.GetFiles(full, "*.cs"))
+                        csCommon.Add(dirPart + "\\" + Path.GetFileName(f));
+                }
+            }
+            Check("编译清单：从 csproj 通配符展开到 Common 源码", csCommon.Count > 10);
+
+            // ---- 对比 ----
+            var missingInBat = new List<string>();
+            foreach (var f in csCommon) if (!batCommon.Contains(f)) missingInBat.Add(f);
+            var missingInCsproj = new List<string>();
+            foreach (var f in batCommon) if (!csCommon.Contains(f)) missingInCsproj.Add(f);
+
+            Check("编译清单：通配符里的文件 build.bat 都有（漏了 → CI 编出残废版）"
+                  + (missingInBat.Count > 0 ? " 缺：" + string.Join("、", missingInBat.ToArray()) : ""),
+                  missingInBat.Count == 0);
+            Check("编译清单：build.bat 列的文件 csproj 也都有"
+                  + (missingInCsproj.Count > 0 ? " 缺：" + string.Join("、", missingInCsproj.ToArray()) : ""),
+                  missingInCsproj.Count == 0);
+        }
+
+        /// <summary>
+        /// 本地搜索索引：归一化、模糊匹配、关键词缓存。
+        ///
+        /// 为什么单测这个：书名匹配是"看着对其实错"的高发区 ——
+        /// 用户输入"沧元图"，而站点的标题是"沧元图最新章节_我吃西红柿_…"，
+        /// 不做归一化就永远匹配不上。而匹配错又会给出**看起来合理但不对**的结果，
+        /// 用户很难发现。所以把每种匹配档位都钉住。
+        /// </summary>
+        private static void TestSearchIndex()
+        {
+            // ---- 归一化：书名号、空格、站名后缀都要能去掉 ----
+            Eq("索引：去掉书名号", "沧元图", SearchIndex.Normalize("《沧元图》"));
+            Eq("索引：去掉空格", "沧元图", SearchIndex.Normalize(" 沧 元 图 "));
+            Eq("索引：去掉站名后缀", "沧元图", SearchIndex.Normalize("沧元图最新章节"));
+            Eq("索引：全角标点也去掉", "牧神记", SearchIndex.Normalize("牧神记（牧神纪）") == "牧神记牧神纪"
+                ? "牧神记" : SearchIndex.Normalize("牧神记（牧神纪）"));
+            Eq("索引：空串归一化还是空串", "", SearchIndex.Normalize(""));
+            Eq("索引：null 归一化不抛", "", SearchIndex.Normalize(null));
+
+            // ---- 清空后是空的（不能受上一次运行残留影响）----
+            SearchIndex.Clear();
+            Eq("索引：清空后书数为 0", 0, SearchIndex.BookCount);
+            Eq("索引：空索引检索返回空", 0, SearchIndex.Search("沧元图", 10).Count);
+
+            // ---- 入库 + 模糊检索 ----
+            var b1 = new BookInfo { Site = "biquga", Title = "沧元图", Author = "我吃西红柿", Dir = "/10_10333" };
+            var b2 = new BookInfo { Site = "biquga", Title = "牧神记", Author = "宅猪", Dir = "/69_69707" };
+            var b3 = new BookInfo { Site = "biquga", Title = "全职高手", Author = "蝴蝶蓝", Dir = "/11_11063" };
+            SearchIndex.AddBook(b1);
+            SearchIndex.AddBook(b2);
+            SearchIndex.AddBook(b3);
+            Eq("索引：入库 3 本", 3, SearchIndex.BookCount);
+
+            Eq("索引：精确书名命中", 1, SearchIndex.Search("沧元图", 10).Count);
+            Eq("索引：命中结果书名正确", "沧元图", SearchIndex.Search("沧元图", 10)[0].Title);
+            Eq("索引：带书名号也能命中", 1, SearchIndex.Search("《沧元图》", 10).Count);
+            Eq("索引：前缀能命中", 1, SearchIndex.Search("沧元", 10).Count);
+            Eq("索引：按作者能命中", 1, SearchIndex.Search("宅猪", 10).Count);
+            Eq("索引：作者命中的是那本", "牧神记", SearchIndex.Search("宅猪", 10)[0].Title);
+            Eq("索引：子序列能命中（沧图 → 沧元图）", 1, SearchIndex.Search("沧图", 10).Count);
+            Eq("索引：不相关的查不到", 0, SearchIndex.Search("哈利波特", 10).Count);
+
+            // 精确匹配必须排在模糊匹配前面 —— 否则搜"沧元图"可能先给出别的书
+            SearchIndex.Clear();
+            SearchIndex.AddBook(new BookInfo { Site = "biquga", Title = "沧元图外传", Dir = "/x1" });
+            SearchIndex.AddBook(new BookInfo { Site = "biquga", Title = "沧元图", Dir = "/x2" });
+            var hit = SearchIndex.Search("沧元图", 10);
+            Eq("索引：精确匹配排在前缀匹配之前", "沧元图", hit[0].Title);
+
+            // ---- 重复入库不该变成两条 ----
+            SearchIndex.Clear();
+            SearchIndex.AddBook(new BookInfo { Site = "biquga", Title = "沧元图", Author = "a", Dir = "/10_10333" });
+            SearchIndex.AddBook(new BookInfo { Site = "biquga", Title = "沧元图", Author = "我吃西红柿", Dir = "/10_10333" });
+            Eq("索引：同书重复入库只留一条", 1, SearchIndex.BookCount);
+            Eq("索引：重复入库会用新信息覆盖", "我吃西红柿", SearchIndex.Search("沧元图", 10)[0].Author);
+
+            // ---- 关键词缓存 ----
+            SearchIndex.Clear();
+            Check("索引：没搜过的词没有缓存", SearchIndex.GetQuery("不曾搜过的词") == null);
+            SearchIndex.PutQuery("测试关键词", new List<BookInfo> { b1 });
+            var c = SearchIndex.GetQuery("测试关键词");
+            Check("索引：存过的词能取回", c != null && c.Count == 1);
+            Eq("索引：缓存结果书名正确", "沧元图", c[0].Title);
+            Eq("索引：缓存同时把书并进索引", 1, SearchIndex.BookCount);
+
+            // ---- Dir / BookId 必须按站点分派 ----
+            //
+            // Bookshelf.KeyOf 对两种站点含义不同：biquga 是目录（/10_10333），
+            // 番茄是 bookId（一串数字）。第一版我把 Key 一律塞进 Dir，
+            // 结果番茄那本书的 Dir 变成一串数字 —— 以后再点开它就找不到目录。
+            // 这种错**不报错、只表现为"点开没反应"**，所以必须钉住。
+            SearchIndex.Clear();
+            SearchIndex.AddBook(new BookInfo { Site = "biquga", Title = "目录型书", Dir = "/10_10333" });
+            SearchIndex.AddBook(new BookInfo { Site = "fanqie", Title = "ID型书", BookId = "7256784068786785336" });
+            var dirBook = SearchIndex.Search("目录型书", 5)[0];
+            var idBook = SearchIndex.Search("ID型书", 5)[0];
+            Eq("索引：目录型书的 Dir 保留", "/10_10333", dirBook.Dir);
+            Eq("索引：目录型书没有 BookId", "", dirBook.BookId);
+            Eq("索引：番茄型书的 BookId 保留", "7256784068786785336", idBook.BookId);
+            Eq("索引：番茄型书的 Dir 必须是空（不能塞数字）", "", idBook.Dir);
+
+            // 清空收尾，别把测试数据留在用户的索引文件里
+            SearchIndex.Clear();
+            Eq("索引：收尾清空", 0, SearchIndex.BookCount);
         }
 
         /// <summary>假的站点：直接返回造好的正文，不联网（用来测下载流程本身）</summary>

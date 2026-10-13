@@ -15,6 +15,7 @@ namespace TomatoBiquga
         private ComboBox cboSite;
         private TextBox txtKeyword;
         private Button btnSearch;
+        private Button btnLocal;   // 本地索引检索（不联网）
         private Button btnLoad;
         private Button btnReload;
         private Button btnWebSearch;
@@ -149,10 +150,16 @@ namespace TomatoBiquga
             _kwHost = kwHost;
 
             btnSearch = MakeButton("搜索", 40, (s, e) => DoSearch());
+            // 本地查：在"搜过 / 下过"的书里模糊检索，**不联网**。
+            // 放在搜索旁边，因为用户的心智是"找书" —— 联网找不到时顺手点这个。
+            btnLocal = MakeButton("本地查", 52, (s, e) => DoLocalSearch());
+            new ToolTip().SetToolTip(btnLocal,
+                "只在你**搜过或下过的书**里做模糊检索，不联网。\n" +
+                "索引靠用过的记录积累，不是全站书目 —— 找不到就点「搜索」联网查（结果会自动入库）。");
             btnLoad = MakeButton("载入目录", 64, (s, e) => DoLoadBook());
             btnReload = MakeButton("刷新目录", 64, (s, e) => DoLoadBookRefresh());
 
-            row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLoad, btnReload });
+            row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLocal, btnLoad, btnReload });
 
             var lblOut = new Label { Text = "保存到：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
             var outHost = new Panel { Width = 230, Height = 24, Margin = new Padding(0, 1, 6, 0) };
@@ -581,6 +588,8 @@ namespace TomatoBiquga
                         "：" + core.ExePath);
                 Log("提示：番茄的搜索用「浏览器搜索」，下载用「用第三方工具下载」，在第三行。");
 
+                // 本地索引：把书架里的书并进来（不联网，很快）
+                SyncLocalIndex();
                 // 版本检测：放到后台线程，**绝不阻塞界面启动** ——
                 // 这个查询要走 GitHub，国内经常要好几秒甚至超时，
                 // 放在主线程会让窗口卡住不出。
@@ -637,6 +646,22 @@ namespace TomatoBiquga
             }
         }
 
+        /// <summary>
+        /// 把书架里的书并进本地搜索索引（启动时做一次，不联网、不阻塞界面）。
+        ///
+        /// 为什么放在启动：老用户书架里已经有一堆书，索引如果只从"新搜索的结果"积累，
+        /// 他们点「本地查」会什么都查不到 —— 那些书从没被索引过。
+        /// 书架里正好有书名和作者，导进来立刻可用。
+        /// </summary>
+        private void SyncLocalIndex()
+        {
+            try
+            {
+                SearchIndex.SyncBookshelf();
+                Log("本地索引：已收录 " + SearchIndex.BookCount + " 本（来自书架与搜过的书），点「本地查」可不联网检索。");
+            }
+            catch (Exception ex) { Log("本地索引初始化失败（不影响使用）：" + ex.Message); }
+        }
         /// <summary>给后台线程用的日志（切回 UI 线程，避免跨线程改控件）</summary>
         private void SafeLog(string msg)
         {
@@ -650,6 +675,59 @@ namespace TomatoBiquga
 
         // ------------------------------------------------------------ 交互
 
+        /// <summary>
+        /// 把搜索结果填进书籍列表。抽出来是因为现在有**两个来源**会填它：
+        /// 联网搜索的结果、以及本地缓存/索引命中的结果 —— 两条路径必须
+        /// 用同一段代码填，否则"缓存命中的那批书"显示出来会和联网的不一样。
+        /// </summary>
+        private void FillBooks(List<BookInfo> list)
+        {
+            UiInvoke(() =>
+            {
+                lstBooks.Items.Clear();
+                if (list == null) return;
+                foreach (var b in list)
+                {
+                    var it = new ListViewItem(b.Title);
+                    it.SubItems.Add(b.Author);
+                    it.SubItems.Add(b.Category);
+                    it.SubItems.Add(b.Desc);
+                    it.Tag = b;
+                    lstBooks.Items.Add(it);
+                }
+                if (lstBooks.Items.Count > 0) lstBooks.Items[0].Selected = true;
+            });
+        }
+
+        /// <summary>
+        /// 本地书名索引检索（**完全不联网**）。
+        ///
+        /// 索引来源有两处：搜索过的书、下载过的书（书架里那本会并进来）。
+        /// 所以"我下过的书"和"我搜过的书"都能这样秒查到，
+        /// 不用再打一次站点 —— 这也是本项目唯一做得到的"本地搜索"。
+        ///
+        /// 说清楚限制：它不是全站书目。biquga 没有全站书目接口，
+        /// 索引只能靠用过的记录慢慢积累。
+        /// </summary>
+        private void DoLocalSearch()
+        {
+            var kw = txtKeyword.Text.Trim();
+            if (kw.Length == 0) { MessageBox.Show("先在搜索框里输入书名或作者，再点「本地查」"); return; }
+
+            var list = SearchIndex.Search(kw, 200);
+            FillBooks(list);
+            if (list.Count > 0)
+            {
+                Log("本地索引命中 " + list.Count + " 条（共索引 " + SearchIndex.BookCount + " 本，未联网）。");
+            }
+            else
+            {
+                Log("本地索引里没有「" + kw + "」（共索引 " + SearchIndex.BookCount + " 本）。");
+                Log("本地索引只包含你**搜过或下过**的书 —— biquga 没有全站书目接口，");
+                Log("所以「没收录」不等于「这本书不存在」，点「搜索」联网找一下即可（结果会自动入库）。");
+            }
+        }
+
         private void DoSearch()
         {
             if (_busy) { BusyNotice(Text); return; }
@@ -659,21 +737,19 @@ namespace TomatoBiquga
             var site = _site;
             RunBackground("搜索中…", () =>
             {
-                var list = site.Search(kw, Log);
-                UiInvoke(() =>
+                // ① 先查本地缓存：搜过的词直接秒回，不再打站点
+                var cached = SearchIndex.GetQuery(kw);
+                if (cached != null)
                 {
-                    lstBooks.Items.Clear();
-                    foreach (var b in list)
-                    {
-                        var it = new ListViewItem(b.Title);
-                        it.SubItems.Add(b.Author);
-                        it.SubItems.Add(b.Category);
-                        it.SubItems.Add(b.Desc);
-                        it.Tag = b;
-                        lstBooks.Items.Add(it);
-                    }
-                    if (list.Count > 0) lstBooks.Items[0].Selected = true;
-                });
+                    Log("搜索「" + kw + "」—— 命中本地缓存（" + cached.Count + " 条），未联网。");
+                    FillBooks(cached);
+                    return;
+                }
+
+                var list = site.Search(kw, Log);
+                // ② 结果落盘：这次搜索下次能重放，同时把书并进累积索引
+                if (list != null && list.Count > 0) SearchIndex.PutQuery(kw, list);
+                FillBooks(list);
                 if (list.Count == 0)
                 {
                     if (site.Name == "番茄小说")

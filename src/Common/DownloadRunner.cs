@@ -181,6 +181,10 @@ namespace TomatoBiquga
             }
             if (pipeline != null) pipeline.Stop();
 
+            // 把这本书并进本地搜索索引 —— 这样「本地查」能查到**下过的书**，
+            // 不只是搜过的书。失败不影响下载结果，所以整段兜住。
+            try { if (Book != null && !string.IsNullOrEmpty(Book.Title)) SearchIndex.AddBook(Book); }
+            catch { }
             // 自动重试：只对失败的那几章再跑一遍（站点偶尔抽风，重试一遍通常就好了）
             if (RetryPasses > 0 && FailedChapters.Count > 0 && !IsCanceled())
             {
