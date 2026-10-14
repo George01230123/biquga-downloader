@@ -57,7 +57,9 @@ internal static class LiveProbe
             else if (mode == "typo") Typo(args);
             else if (mode == "typooffline") TypoOffline(args);
             else if (mode == "probe") Probe(args);
-            else { Console.WriteLine("未知模式。可用：cover / fanqie / export / typo / typooffline / probe"); return 1; }
+            else if (mode == "sites") Sites(args);
+            else if (mode == "rate") Rate(args);
+            else { Console.WriteLine("未知模式。可用：cover / fanqie / export / typo / typooffline / probe / sites / rate"); return 1; }
         }
         catch (Exception ex)
         {
@@ -71,13 +73,171 @@ internal static class LiveProbe
         return _fail == 0 ? 0 : 1;
     }
 
-    // ------------------------------------------------------------ 站点探活
+    // ------------------------------------------------------------ 「自动选最快」实测
+
+    /// <summary>
+    /// 跑一遍 SiteRater（就是界面「自动选最快」用的那套），打印排名，
+    /// 并把结果写进 站点配置.ini 的 [评分] 段，然后读回验证往返。
+    ///
+    ///   _liveprobe.exe rate [ini路径]
+    /// </summary>
+    private static void Rate(string[] args)
+    {
+        string ini = args.Length > 1 ? args[1] : SiteProfileStore.DefaultPath;
+        Console.WriteLine("实测各站点速度（综合分 = 搜索 + 目录 + 正文单章），每站最多 3 个请求");
+        Console.WriteLine("ini = " + ini);
+        Console.WriteLine();
+
+        List<SiteScore> scores = null;
+        try { scores = SiteRater.MeasureAll(delegate (string m) { Console.WriteLine(m); }); }
+        catch (Exception ex) { Console.WriteLine("[FAIL] 实测异常：" + ex.Message); _fail++; return; }
+
+        Chk("实测：每个注册站点都有一条结果",
+            scores != null && scores.Count == SiteRegistry.Count,
+            scores == null ? "null" : scores.Count + " / " + SiteRegistry.Count);
+
+        Console.WriteLine();
+        Console.WriteLine("排名（越快越靠前）：");
+        int n = 0;
+        foreach (var s in SiteRater.Rank(scores))
+        {
+            n++;
+            Console.WriteLine(string.Format("  {0}. {1}", n, s));
+            if (s.TocCount > 0)
+                Console.WriteLine(string.Format("     实测书：《{0}》，目录 {1} 章", s.SampleTitle, s.TocCount));
+        }
+
+        string fast = SiteRater.FastestKey(scores);
+        Console.WriteLine();
+        Console.WriteLine("最快站点 = " + (fast == null ? "（无可用站点 → 界面会回退到笔趣阁 PC版）" : SiteRegistry.LabelOf(fast)));
+        Chk("实测：至少有一个可用站点", fast != null || scores.Count == 0);
+        if (fast != null)
+            Chk("实测：最快站点确实在注册表里", SiteRegistry.ByKey(fast) != null);
+
+        // 写盘 + 读回
+        SiteRater.Save(scores, ini);
+        var back = SiteRater.Load(ini);
+        Chk("实测：评分能写进 ini 并读回", back != null && back.Count == scores.Count,
+            back == null ? "读回 null" : back.Count + " / " + scores.Count);
+        Chk("实测：读回后仍判定为新鲜（24 小时内）", SiteRater.IsFresh(back));
+        if (back != null)
+        {
+            string fast2 = SiteRater.FastestKey(back);
+            Chk("实测：读回后最快站点一致", string.Equals(fast, fast2, StringComparison.Ordinal),
+                fast + " vs " + fast2);
+        }
+    }
+
+    // ------------------------------------------------------------ 规则表站点全链路实测
+    /// <summary>
+    /// 对**每个规则表站点**跑一遍真实全链路：搜索 → 载入目录 → 抓第一章正文。
+    ///
+    /// 这是"规则表到底对不对"的唯一权威验证 —— 离线测试只能证明正则对着
+    /// **存档的 HTML** 能跑，证明不了站点今天还长这样。
+    ///
+    /// 顺便打印每个维度的耗时，这就是"自动选最快站点"评分的原始数据。
+    ///
+    ///   _liveprobe.exe sites [关键词]     不带关键词就用规则里的 KnownTitles[0]
+    /// </summary>
+    private static void Sites(string[] args)
+    {
+        string forceKeyword = args.Length > 1 ? args[1] : null;
+        var rules = SiteRules.All();
+        Console.WriteLine(string.Format("规则表站点全链路实测（{0} 个站点）：搜索 → 目录 → 正文", rules.Count));
+        Console.WriteLine();
+
+        foreach (var rule in rules)
+        {
+            string kw = forceKeyword;
+            if (string.IsNullOrEmpty(kw) && rule.KnownTitles != null && rule.KnownTitles.Length > 0)
+                kw = rule.KnownTitles[0];
+
+            Console.WriteLine("【" + rule.DisplayName + "】 " + rule.Key + "   关键词：" + kw);
+            var site = new RuleSite(rule);
+            var sw = new System.Diagnostics.Stopwatch();
+
+            // --- 探活 ---
+            string reason = null;
+            try { reason = site.Probe(); } catch (Exception ex) { reason = ex.Message; }
+            if (reason != null)
+            {
+                Console.WriteLine("    [FAIL] 站点不可用：" + reason);
+                _fail++; Fails.Add(rule.Key + " 不可用：" + reason);
+                Console.WriteLine();
+                continue;
+            }
+
+            // --- 搜索 ---
+            List<BookInfo> found = null;
+            sw.Restart();
+            try { found = site.Search(kw, null); }
+            catch (Exception ex) { Console.WriteLine("    [FAIL] 搜索异常：" + ex.Message); }
+            sw.Stop();
+            long tSearch = sw.ElapsedMilliseconds;
+            Chk(rule.Key + "：搜索有结果", found != null && found.Count > 0,
+                found == null ? "null" : found.Count + " 条");
+            if (found == null || found.Count == 0) { Console.WriteLine(); continue; }
+            Console.WriteLine(string.Format("    搜索 {0} ms，{1} 条，第一条：《{2}》",
+                tSearch, found.Count, found[0].Title));
+            Chk(rule.Key + "：搜索拿到了书名", !string.IsNullOrEmpty(found[0].Title)
+                && found[0].Title != "（载入后取书名）");
+
+            // --- 载入目录 ---
+            BookInfo book = null;
+            sw.Restart();
+            try { book = site.LoadBook(found[0], null); }
+            catch (Exception ex) { Console.WriteLine("    [FAIL] 载入目录异常：" + ex.Message); }
+            sw.Stop();
+            long tToc = sw.ElapsedMilliseconds;
+            Chk(rule.Key + "：目录非空", book != null && book.Chapters != null && book.Chapters.Count > 0,
+                book == null ? "null" : (book.Chapters == null ? "null" : book.Chapters.Count + " 章"));
+            if (book == null || book.Chapters == null || book.Chapters.Count == 0) { Console.WriteLine(); continue; }
+            Console.WriteLine(string.Format("    目录 {0} ms，{1} 章，范围：{2} → {3}",
+                tToc, book.Chapters.Count, book.Chapters[0].Title, book.Chapters[book.Chapters.Count - 1].Title));
+            Console.WriteLine("    前 3 章：" + book.Chapters[0].Id + "=《" + book.Chapters[0].Title + "》 "
+                + (book.Chapters.Count > 1 ? book.Chapters[1].Id + "=《" + book.Chapters[1].Title + "》 " : "")
+                + (book.Chapters.Count > 2 ? book.Chapters[2].Id + "=《" + book.Chapters[2].Title + "》" : ""));
+            Console.WriteLine(string.Format("    书名《{0}》 作者：{1}", book.Title, book.Author));
+            Chk(rule.Key + "：目录章节标题不像 id 兜底",
+                book.Chapters[0].Title != "第 1 章");
+
+            // --- 正文（取中间一章，避开卷首/公告） ---
+            var mid = book.Chapters[book.Chapters.Count / 2];
+            sw.Restart();
+            string text = null;
+            try { text = site.LoadChapter(book, mid, null); }
+            catch (Exception ex) { Console.WriteLine("    [FAIL] 抓正文异常：" + ex.Message); }
+            sw.Stop();
+            long tCh = sw.ElapsedMilliseconds;
+            int cjk = 0;
+            if (!string.IsNullOrEmpty(text))
+                foreach (var c in text) if (c >= 0x4e00 && c <= 0x9fff) cjk++;
+            Chk(rule.Key + "：正文字数够（>300 汉字）", cjk > 300, cjk + " 汉字");
+            Console.WriteLine(string.Format("    正文 {0} ms，{1} 汉字（第 {2} 章 {3}）",
+                tCh, cjk, book.Chapters.Count / 2 + 1, mid.Title));
+            if (!string.IsNullOrEmpty(text))
+            {
+                var head = text.Length > 90 ? text.Substring(0, 90) : text;
+                Console.WriteLine("    正文开头：" + head.Replace("\n", " "));
+                Chk(rule.Key + "：正文没有残留 HTML 标签",
+                    text.IndexOf("<br", StringComparison.OrdinalIgnoreCase) < 0
+                    && text.IndexOf("&nbsp;", StringComparison.Ordinal) < 0
+                    && text.IndexOf("<div", StringComparison.OrdinalIgnoreCase) < 0);
+            }
+
+            Console.WriteLine(string.Format("    ── 综合分（越小越快）：{0} ms  = 搜索 {1} + 目录 {2} + 正文 {3}",
+                tSearch + tToc + tCh, tSearch, tToc, tCh));
+            Console.WriteLine();
+        }
+    }
 
     private static void Probe(string[] args)
     {
-        Console.WriteLine("对三个站点各探活一次（各发 1 个请求）");
+        // 站点列表来自注册表（以前这里是手写的三个），加站点不用改这里
+        var sites = new List<ISite>();
+        foreach (var d in SiteRegistry.All) sites.Add(d.Factory());
+        Console.WriteLine(string.Format("对 {0} 个站点各探活一次（各发 1 个请求）", sites.Count));
         Console.WriteLine();
-        var sites = new ISite[] { new FanqieSite(), new BiqugaMobileSite(), new BiqugaSite() };
         foreach (var s in sites)
         {
             var p = s as IProbeable;
@@ -146,7 +306,7 @@ internal static class LiveProbe
         Console.WriteLine("    对照源：《" + otherBook.Title + "》 " + otherBook.Chapters.Count + " 章");
 
         // 主源：PC 版现场抓
-        var pc = new BiqugaSite { CrawlWorkers = 6 };
+        var pc = new BiqugaSite();
         var stub = new BookInfo { Site = "biquga", Dir = "/" + dirKey, Url = BiqugaSite.Origin + "/" + dirKey + "/" };
         var book = pc.LoadBook(stub, m => Console.WriteLine("    [目录] " + m));
         Chk("主源目录载入", book != null && book.Chapters.Count > 0);
@@ -270,7 +430,7 @@ internal static class LiveProbe
         // 对照源：同一个站点类型，重新抓这些章
         var other = otherKey == "biquga-m"
             ? (ISite)new BiqugaMobileSite { Workers = 6 }
-            : (ISite)new BiqugaSite { CrawlWorkers = 6 };
+            : (ISite)new BiqugaSite();
 
         Console.WriteLine();
         Console.WriteLine("对照源：" + other.Name + "（重新抓取，只抓前 " + limit + " 章）");

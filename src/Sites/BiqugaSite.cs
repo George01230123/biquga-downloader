@@ -31,7 +31,19 @@ namespace TomatoBiquga
         private readonly Dictionary<string, string> _textCache = new Dictionary<string, string>();
         private readonly object _lock = new object();
 
-        public int CrawlWorkers = 6;
+        // ★ 这里原来有一个 `public int CrawlWorkers = 6;`，已删除。
+        //   它被 MainForm 赋了 4 次值，却**全项目没有任何地方读它** ——
+        //   是个骗人的旋钮：用户在「设置」里把"PC并发"从 6 调到 32，
+        //   目录遍历一点都不会变快（docs/架构.md 还照着它写了
+        //   "PC 版目录遍历用 CrawlWorkers"，描述的是一段不存在的行为）。
+        //
+        //   为什么不改成真的并发：**结构上做不到**。目录遍历是"反向链条"——
+        //   第 N-1 页的地址只写在**第 N 页的 HTML** 里（`var uiiekp0do`），
+        //   必须先取到第 N 页才知道下一页取什么，天然串行。
+        //   （项目里也验证过"按 id 递增规律预测"，命中率极低、反而更慢。）
+        //
+        //   真正快的做法是**换源**：笔尖中文的目录一页给全 1300+ 章、
+        //   实测 0.65 秒，比走 772 页串行链快三个数量级。见 SiteRules.cs。
 
         /// <summary>为 true 时忽略本地目录缓存，强制重新遍历站点</summary>
         public bool ForceRefresh = false;
@@ -81,11 +93,21 @@ namespace TomatoBiquga
 
         // ---------------------------------------------------------- 目录
 
+        /// <summary>
+        /// 为 true 时**跳过读取**目录缓存（但照常写缓存）。
+        ///
+        /// 和 ForceRefresh 的区别：ForceRefresh 是"用户点了刷新目录"，
+        /// 语义是"我要最新的"；SuppressDirCache 是"我要测真实速度"——
+        /// 把缓存命中当成"这个站很快"会让速度排名完全失真。
+        /// 「自动选最快」用它来保证测的是真实遍历成本。
+        /// </summary>
+        public bool SuppressDirCache = false;
+
         public BookInfo LoadBook(BookInfo item, Action<string> log)
         {
             // 0) 目录缓存：命中就免去几分钟的遍历（离线模式下必须真遍历，否则拿不到正文）
             var cacheKey = (item.Dir ?? "").Replace("/", "");
-            if (!ForceRefresh && !Offline)
+            if (!ForceRefresh && !SuppressDirCache && !Offline)
             {
                 var cached = DirCache.Load("biquga", cacheKey);
                 if (cached != null)

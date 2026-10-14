@@ -58,6 +58,21 @@ namespace TomatoBiquga
         public class QueryHit
         {
             public string keyword { get; set; }
+
+            /// <summary>
+            /// 这次搜索是在哪个站点做的（SiteRegistry 的 Key）。
+            ///
+            /// ★ 为什么必须存：这本书里搜出来的书是**那个站点**的书 ——
+            ///   它的 Dir/Url 只在那站点有效。缓存不带站点维度的话，
+            ///   在 A 站搜「沧元图」、切到 B 站再搜，会**直接返回 A 站的结果**，
+            ///   于是"载入目录"拿着 A 站的地址去请求 B 站。
+            ///   3 个站点时这是潜在 bug，站点一多就是必然出错。
+            ///
+            /// 老索引文件里没有这个字段 → 反序列化后是 null，
+            /// 由 <see cref="SiteKeyCompatible"/> 决定"能不能用"，不会被误当成命中。
+            /// </summary>
+            public string site { get; set; }
+
             public string savedAt { get; set; }
             public List<Entry> books { get; set; }
         }
@@ -162,8 +177,8 @@ namespace TomatoBiquga
 
         // ---------------------------------------------------------- ① 关键词缓存
 
-        /// <summary>取关键词的缓存结果；没有或过期返回 null</summary>
-        public static List<BookInfo> GetQuery(string keyword)
+        /// <summary>取关键词的缓存结果；没有、过期、或**不是这个站点搜的**则返回 null</summary>
+        public static List<BookInfo> GetQuery(string keyword, string siteKey)
         {
             if (string.IsNullOrEmpty(keyword)) return null;
             var s = Load();
@@ -173,6 +188,8 @@ namespace TomatoBiquga
                 foreach (var q in s.queries)
                 {
                     if (!string.Equals(q.keyword, k, StringComparison.OrdinalIgnoreCase)) continue;
+                    // ★ 站点必须对得上 —— 否则会把别的站点搜出来的书当作本站结果
+                    if (!SiteKeyCompatible(q.site, siteKey)) continue;
                     var at = ParseTime(q.savedAt);
                     // 过期就当没有 —— 书站会加新书，旧结果不能一直用
                     if (at.HasValue && (DateTime.Now - at.Value).TotalHours > MaxAgeHours) return null;
@@ -184,8 +201,23 @@ namespace TomatoBiquga
             return null;
         }
 
-        /// <summary>存一次搜索结果（同时把书并进累积索引）</summary>
-        public static void PutQuery(string keyword, List<BookInfo> books)
+        /// <summary>
+        /// 缓存里记的站点和现在要用的站点是否兼容。
+        ///
+        /// 老索引（加站点维度之前写的）没有 site 字段 → 读出来是 null。
+        /// 那种记录**不知道**是哪个站搜的，所以一律不用（当作未命中，让它重新搜一次）。
+        /// 宁可贵一次搜索，也不能把 A 站的书当成 B 站的结果 ——
+        /// 后者会让"载入目录"拿着错的地址去请求，用户看到的是莫名其妙的失败。
+        /// </summary>
+        internal static bool SiteKeyCompatible(string cachedSite, string wantedSite)
+        {
+            if (string.IsNullOrEmpty(cachedSite)) return false;
+            if (string.IsNullOrEmpty(wantedSite)) return false;
+            return string.Equals(cachedSite, wantedSite, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>存一次搜索结果（同时把书并进累积索引）。siteKey = 这次是在哪个站点搜的。</summary>
+        public static void PutQuery(string keyword, List<BookInfo> books, string siteKey)
         {
             if (string.IsNullOrEmpty(keyword) || books == null) return;
             var s = Load();
@@ -193,13 +225,16 @@ namespace TomatoBiquga
             lock (_lock)
             {
                 QueryHit hit = null;
+                // ★ 同一个关键词在不同站点是**不同的**缓存条目，所以查找也要带站点。
                 foreach (var q in s.queries)
-                    if (string.Equals(q.keyword, k, StringComparison.OrdinalIgnoreCase)) { hit = q; break; }
+                    if (string.Equals(q.keyword, k, StringComparison.OrdinalIgnoreCase)
+                        && SiteKeyCompatible(q.site, siteKey)) { hit = q; break; }
                 if (hit == null)
                 {
                     hit = new QueryHit { keyword = k, books = new List<Entry>() };
                     s.queries.Add(hit);
                 }
+                hit.site = siteKey;
                 hit.savedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                 hit.books = new List<Entry>();
                 foreach (var b in books) { hit.books.Add(Entry.FromBook(b)); AddBookLocked(s, b); }

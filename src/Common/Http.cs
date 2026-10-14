@@ -352,6 +352,12 @@ namespace TomatoBiquga
             {
                 try
                 {
+                    // ★ 每轮开始先把状态码清成"未知"。
+                    //   否则上一轮留下的状态码会漏到这一轮：比如第 1 次是 502、
+                    //   第 2 次其实成功了，判据读到的却还是 502，于是把一个正常响应
+                    //   当成错误丢掉。状态码是"逐次"的，不是"粘住"的。
+                    LastStatusCode = 0;
+
                     string text;
                     if (CurlAvailable)
                     {
@@ -365,8 +371,11 @@ namespace TomatoBiquga
                     }
                     if (string.IsNullOrEmpty(text)) throw new Exception("返回内容为空");
 
-                    // 状态码先判：429/503 是明确的「别来了」，要冷却而不是立刻重试
-                    if (LastStatusCode == 429 || LastStatusCode == 503)
+                    // 状态码先判：429/502/503 是"服务器现在不行"，要退避重试；
+                    // ★ 502 是实测加的：笔趣阁的源站会间歇性回 nginx 502
+                    //   （实测 20 次里出现过、也出现过连续 502），
+                    //   它**不是**限流（别降并发），但确实该重试。
+                    if (IsRetryableStatus(LastStatusCode))
                     {
                         NoteThrottle();
                         throw new ThrottledException(string.Format("站点限流（HTTP {0}）", LastStatusCode));
@@ -391,7 +400,15 @@ namespace TomatoBiquga
                 {
                     last = ex;
                     // curl 失败时尝试原生后端（限流不适用：换后端解决不了限流）
-                    if (CurlAvailable && attempt == 0 && !(ex is ThrottledException))
+                    //
+                    // ★ 但**已知拒绝 .NET 握手的站点**要跳过这次回退：
+                    //   biquga 就是（Http.cs 顶部注释写了它只收 TLS 1.3 且会把
+                    //   Schannel 的握手拒掉）。对这类站点回退是**稳输**的，
+                    //   而且每次要白等满 25 秒超时（TimeOutSeconds），
+                    //   再乘上重试次数 —— 一个 502 就能白等一分多钟。
+                    //   判据按"主机"记：别的域名没这个毛病，不该被连累。
+                    if (CurlAvailable && attempt == 0 && !(ex is ThrottledException)
+                        && !SchannelRejectedHost(url))
                     {
                         try
                         {
@@ -406,6 +423,7 @@ namespace TomatoBiquga
                             // 早先直接 last = ex2，结果站点探活只能报出"请求失败"，
                             // 完全帮不到用户。现在两个都留着。
                             last = new Exception(ex.Message + "；换用内置 .NET 请求也失败：" + ex2.Message);
+                            NoteSchannelRejected(url, ex2.Message);
                         }
                     }
                     if (attempt < MaxRetries - 1) SleepBackoff(attempt, ex is ThrottledException);
@@ -421,6 +439,80 @@ namespace TomatoBiquga
         public class ThrottledException : Exception
         {
             public ThrottledException(string msg) : base(msg) { }
+        }
+
+        /// <summary>
+        /// 这个状态码是不是"服务器现在不行，值得退避重试"。
+        ///
+        /// · 429 太频繁 —— 站点明确要求慢下来
+        /// · 502 网关错误 —— 实测笔趣阁源站会间歇性回这个（nginx 502）
+        /// · 503 服务不可用 —— 通常是临时过载
+        ///
+        /// **403 故意不算**：那是"站点不让你来"（要 Cookie / 要代理），
+        /// 重试只会白等，而且会被当成攻击。它走 ThrottledException 那条路。
+        /// 做成独立方法是为了能离线单测 —— 这个判据以前只在真实网络下才走到。
+        /// </summary>
+        internal static bool IsRetryableStatus(int code)
+        {
+            return code == 429 || code == 502 || code == 503;
+        }
+
+        /// <summary>
+        /// 已知会拒绝 .NET(Schannel) TLS 握手的主机。
+        ///
+        /// 为什么要记：`FetchWithDotNet` 回退对这类站点是**稳输**的，
+        /// 而且每次要等满 25 秒超时。实测 biquga 就是这样 ——
+        /// 一个 502 触发的回退，白等 25 秒，再乘 3 次重试。
+        /// 按主机记，别的域名不受影响。
+        /// </summary>
+        private static readonly HashSet<string> _schannelRejected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly object _schannelLock = new object();
+
+        private static bool SchannelRejectedHost(string url)
+        {
+            string host = HostOf(url);
+            if (host == null) return false;
+            lock (_schannelLock) return _schannelRejected.Contains(host);
+        }
+
+        /// <summary>
+        /// 记下"这个主机的 .NET 回退也失败了"，下次就别再试。
+        /// 只在错误信息确实指向 TLS/协议层时才记 —— 普通超时不该被当成
+        /// "永远别用 .NET"，那会让回退机制彻底失效。
+        /// </summary>
+        private static void NoteSchannelRejected(string url, string err)
+        {
+            if (string.IsNullOrEmpty(err)) return;
+            string e = err.ToLowerInvariant();
+            bool tlsLike = e.Contains("handshake") || e.Contains("schannel") || e.Contains("ssl")
+                        || e.Contains("tls") || e.Contains("eof") || e.Contains("protocol");
+            if (!tlsLike) return;
+            string host = HostOf(url);
+            if (host == null) return;
+            lock (_schannelLock) _schannelRejected.Add(host);
+        }
+
+        /// <summary>仅供离线单测：把一个主机标记成"拒绝 Schannel"</summary>
+        internal static void NoteSchannelRejectedForTest(string url, string err)
+        {
+            NoteSchannelRejected(url, err);
+        }
+
+        /// <summary>仅供离线单测：查询某个主机是否已被标记</summary>
+        internal static bool SchannelRejectedForTest(string url)
+        {
+            return SchannelRejectedHost(url);
+        }
+
+        private static string HostOf(string url)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(url)) return null;
+                var u = new Uri(url, UriKind.Absolute);
+                return u.Host;
+            }
+            catch { return null; }
         }
 
         /// <summary>

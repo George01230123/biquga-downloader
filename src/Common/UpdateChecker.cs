@@ -25,7 +25,11 @@ namespace TomatoBiquga
     public static class UpdateChecker
     {
         public const string Owner = "George01230123";
-        public const string Repo = "biquga-downloader";
+        // ★ 仓库已从 biquga-downloader 改名为 novel-downloader（v1.5.0 起）。
+        //   改名后 GitHub **会重定向旧地址**，但 api.github.com 的重定向行为
+        //   不能完全指望 —— 所以这里直接写新名。老版本客户端（写死旧名）
+        //   如果因为改名而检查不到更新，用户重新下一次新包就恢复了。
+        public const string Repo = "novel-downloader";
 
         public static string ReleasesApi
         {

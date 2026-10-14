@@ -133,25 +133,36 @@ namespace TomatoBiquga
             get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, FileName); }
         }
 
-        /// <summary>内置默认值：三个站点各一份，和代码里的默认参数一致</summary>
+        /// <summary>
+        /// 默认值：按 <see cref="SiteRegistry"/> 给**每一个**注册站点生成一份，
+        /// 加站点不用再来这里补一段。少数站点有实测调过的参数（下面几个特例）就覆盖掉。
+        /// </summary>
         public static List<SiteProfile> Defaults()
         {
             var list = new List<SiteProfile>();
-            list.Add(new SiteProfile
+            foreach (var d in SiteRegistry.All)
             {
-                Name = "fanqie", DisplayName = "番茄小说",
-                Workers = 4, MinDelayMs = 120, MaxDelayMs = 400, TimeoutSeconds = 25, MaxRetries = 3,
-            });
-            list.Add(new SiteProfile
-            {
-                Name = "biquga-m", DisplayName = "笔趣阁（移动版·快）",
-                Workers = 8, MinDelayMs = 60, MaxDelayMs = 180, TimeoutSeconds = 25, MaxRetries = 3,
-            });
-            list.Add(new SiteProfile
-            {
-                Name = "biquga", DisplayName = "笔趣阁（PC版·慢）",
-                Workers = 6, MinDelayMs = 120, MaxDelayMs = 400, TimeoutSeconds = 25, MaxRetries = 3,
-            });
+                // 实测调出来的基线：移动版 8 线程 / 间隔 60~180 是"实测 1000 章约 10 分钟"那组参数；
+                // 其余默认 6 线程 / 120~400。
+                bool mobile = string.Equals(d.Key, "biquga-m", StringComparison.OrdinalIgnoreCase);
+                bool fanqie = string.Equals(d.Key, "fanqie", StringComparison.OrdinalIgnoreCase);
+
+                var p = new SiteProfile
+                {
+                    Name = d.Key,
+                    DisplayName = d.DisplayName,
+                    Workers = mobile ? 8 : (fanqie ? 4 : 6),
+                    MinDelayMs = mobile ? 60 : (fanqie ? 120 : 120),
+                    MaxDelayMs = mobile ? 180 : (fanqie ? 400 : 400),
+                    TimeoutSeconds = 25,
+                    MaxRetries = 3,
+                    // MobileHost 保持空：它的语义是"**用户**手填的域名覆盖"，
+                    // 给它预填一个默认值会让"用户没改过"和"用户改成了同一个值"
+                    // 变得无法区分（BiqugaMobileSite.SetHost 里有自己的内置默认）。
+                    MobileHost = "",
+                };
+                list.Add(p);
+            }
             return list;
         }
 
@@ -265,6 +276,18 @@ namespace TomatoBiquga
             sb.AppendLine("#        留空 = 直连。SOCKS 只有 curl 后端支持（Windows 10+ 自带 curl，一般都能用）。");
             sb.AppendLine("# cookie：需要登录态的站点填自己的 Cookie（浏览器 F12 → Network → 请求头里复制整串）。");
             sb.AppendLine("#         这是让站点「认得你」，不是绕过权限 —— 请只填你自己账号的 Cookie。");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine();
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# 关于本文件末尾可能出现的 [评分] 段");
+            sb.AppendLine("# ============================================================");
+            sb.AppendLine("# 勾上界面上的「自动」（自动选最快站点）之后，程序会实测各站速度，");
+            sb.AppendLine("# 并把结果写在本文件末尾的 [评分] 段里。格式（时间单位毫秒，越小越快）：");
+            sb.AppendLine("#     站点key=搜索,目录,正文,目录章数,Ticks时间戳,实测书名");
+            sb.AppendLine("# 不可用的站点三项耗时**留空**，但时间戳照存 —— 否则 24 小时过期算不准。");
+            sb.AppendLine("# **删掉 [评分] 段就会重新实测**；留着则 24 小时内直接用缓存。");
+            sb.AppendLine("# 单站实测有 90 秒上限：笔趣阁 PC 版真实遍历要 15 分钟，");
+            sb.AppendLine("# 不设上限的话点一次「检测站点」要等一刻钟。");
             sb.AppendLine("# ============================================================");
             sb.AppendLine();
             foreach (var p in profiles)

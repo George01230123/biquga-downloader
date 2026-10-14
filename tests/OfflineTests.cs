@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using TomatoBiquga;
 
@@ -242,12 +243,17 @@ namespace TomatoBiquga
                 TestDirCacheRoundTrip();
                 TestSanitizeDesc();
                 TestResolvePaths(work);
+                TestResolvePathsSiteCollision(work);
                 TestBuildHeader();
                 TestFixHeaderNow(work);
                 TestMissingReport(work);
                 TestProgressMarker(work);
                 TestChapterIndex(work);
                 TestSiteProfile(work);
+                TestSiteRegistry();
+                TestSiteRuleTable();
+                TestRuleSiteParsing();
+                TestSiteRating(work);
                 TestMarkdown(work);
                 TestFillMissing(work, ref _fakeNet);
                 TestOutputEncoding(work, ref _fakeNet);
@@ -267,6 +273,7 @@ namespace TomatoBiquga
                 TestVolumeGroupingExact(work);
                 TestRateLimitMarkers();
                 TestParseHttpCode();
+                TestRetryPolicy();
                 // 简繁转换（字表全部内联，无外部数据文件）
                 TestZhConvert();
                 TestZhConvertLi();
@@ -645,6 +652,94 @@ namespace TomatoBiquga
 
             // 只是算路径，不应该顺手建目录
             Check("ResolvePaths 不创建目录", !Directory.Exists(bookDir));
+        }
+
+        // ============================================================
+        //  6b) 跨站点同名书不能互相覆盖
+        // ============================================================
+
+        private static void TestResolvePathsSiteCollision(string work)
+        {
+            // ★ 这个测试必须写**真实的**书架文件（ResolvePaths 内部读的就是它），
+            //   所以先把原文件备份出来，跑完再放回去 —— 否则会污染
+            //   exe 旁边的 书架.json，把后面依赖它的测试全带崩
+            //   （第一版就是这么挂掉 11 条增量/编码测试的）。
+            var realShelf = Bookshelf.DefaultPath;
+            byte[] backup = null;
+            bool hadShelf = File.Exists(realShelf);
+            if (hadShelf) backup = File.ReadAllBytes(realShelf);
+
+            try
+            {
+                RunCollisionChecks(work);
+            }
+            finally
+            {
+                try
+                {
+                    if (hadShelf) File.WriteAllBytes(realShelf, backup);
+                    else if (File.Exists(realShelf)) File.Delete(realShelf);
+                }
+                catch { }
+            }
+        }
+
+        private static void RunCollisionChecks(string work)
+        {
+            var root = Path.Combine(work, "collide");
+            Directory.CreateDirectory(root);
+            string bookDir, txtPath;
+
+            // ---------- 1) 目录不存在 → 用干净名字（保持老行为，老用户不受影响） ----------
+            DownloadRunner.ResolvePaths(root, "沧元图", "xbiquwk", out bookDir, out txtPath);
+            Eq("撞车：目录不存在时用干净名字", Path.Combine(root, "沧元图"), bookDir);
+
+            // ---------- 2) 目录存在、且属于本站 → 仍然用干净名字（继续增量更新） ----------
+            var dir = Path.Combine(root, "沧元图");
+            Directory.CreateDirectory(dir);
+            var txt = Path.Combine(dir, "沧元图.txt");
+            File.WriteAllText(txt, "旧内容", new UTF8Encoding(false));
+            // 用一个干净的书架记录归属：直接把记录写进真实书架文件
+            var shelf = new Bookshelf();
+            shelf.Touch(new BookInfo { Site = "xbiquwk", Title = "沧元图", Dir = "/1_1245/" }, txt, 10, true);
+            shelf.Save(Bookshelf.DefaultPath);
+            DownloadRunner.ResolvePaths(root, "沧元图", "xbiquwk", out bookDir, out txtPath);
+            Eq("撞车：本站已有目录时仍用干净名字（不重复下载）",
+                Path.Combine(root, "沧元图"), bookDir);
+            Eq("撞车：txt 路径也保持老样子", txt, txtPath);
+
+            // ---------- 3) 另一个站点要下同名书 → 必须加站点后缀 ----------
+            DownloadRunner.ResolvePaths(root, "沧元图", "biquga", out bookDir, out txtPath);
+            Check("撞车：别的站点下同名书会换目录", bookDir != Path.Combine(root, "沧元图"));
+            Check("撞车：换出来的目录带站点名", bookDir.IndexOf("笔趣阁", StringComparison.Ordinal) >= 0);
+            Eq("撞车：新目录里的 txt 与目录同名", bookDir, Path.GetDirectoryName(txtPath));
+            Check("撞车：原目录里的 txt 没被改", File.Exists(txt));
+
+            // ---------- 4) 目录存在但书架无记录 → **不改名**（保持老行为） ----------
+            //
+            // 这条是踩出来的：早先我加了"目录里有 .txt 但查不到归属也算撞车"，
+            // 结果把"没有任何书架记录、但目录里已经下过书"的普通情况也判成撞车，
+            // 于是**再次下载会写到一个新目录里**（增量/续传/补齐全废，
+            // 一次打挂 22 条测试）。改名必须有证据，不能靠猜 ——
+            // 没有证据就保持原样，否则用户已有的产物会变成孤儿。
+            var root2 = Path.Combine(work, "collide2");
+            Directory.CreateDirectory(root2);
+            var orphan = Path.Combine(root2, "孤儿书");
+            Directory.CreateDirectory(orphan);
+            File.WriteAllText(Path.Combine(orphan, "孤儿书.txt"), "已有产物", new UTF8Encoding(false));
+            DownloadRunner.ResolvePaths(root2, "孤儿书", "xbiquwk", out bookDir, out txtPath);
+            Eq("撞车：归属不明时保持原目录（不制造孤儿产物）", orphan, bookDir);
+
+            // ---------- 5) 目录存在但书架无记录、里面也没产物 → 同样保持干净名字 ----------
+            var root3 = Path.Combine(work, "collide3");
+            Directory.CreateDirectory(root3);
+            Directory.CreateDirectory(Path.Combine(root3, "空目录书"));
+            DownloadRunner.ResolvePaths(root3, "空目录书", "xbiquwk", out bookDir, out txtPath);
+            Eq("撞车：空目录不换名字", Path.Combine(root3, "空目录书"), bookDir);
+
+            // ---------- 6) 不传站点（老调用方）→ 行为完全不变 ----------
+            DownloadRunner.ResolvePaths(root, "沧元图", out bookDir, out txtPath);
+            Eq("撞车：不传站点时保持老行为", Path.Combine(root, "沧元图"), bookDir);
         }
 
         // ============================================================
@@ -1696,12 +1791,39 @@ namespace TomatoBiquga
 
             // ---- 关键词缓存 ----
             SearchIndex.Clear();
-            Check("索引：没搜过的词没有缓存", SearchIndex.GetQuery("不曾搜过的词") == null);
-            SearchIndex.PutQuery("测试关键词", new List<BookInfo> { b1 });
-            var c = SearchIndex.GetQuery("测试关键词");
+            Check("索引：没搜过的词没有缓存", SearchIndex.GetQuery("不曾搜过的词", "biquga") == null);
+            SearchIndex.PutQuery("测试关键词", new List<BookInfo> { b1 }, "biquga");
+            var c = SearchIndex.GetQuery("测试关键词", "biquga");
             Check("索引：存过的词能取回", c != null && c.Count == 1);
             Eq("索引：缓存结果书名正确", "沧元图", c[0].Title);
             Eq("索引：缓存同时把书并进索引", 1, SearchIndex.BookCount);
+
+            // ---- ★ 关键词缓存必须带**站点维度** ----
+            //
+            // 这是站点变多之后必然出错的一处：缓存只按关键词查的话，
+            // 在 A 站搜「沧元图」、切到 B 站再搜，会**直接返回 A 站的结果**，
+            // 于是"载入目录"拿着 A 站的地址去请求 B 站。
+            Check("索引：同一个词在别的站点取不到缓存（站点维度）",
+                SearchIndex.GetQuery("测试关键词", "xbiquwk") == null);
+            SearchIndex.PutQuery("测试关键词", new List<BookInfo>
+            {
+                new BookInfo { Site = "xbiquwk", Title = "另一个站的沧元图", Dir = "/9_9/" }
+            }, "xbiquwk");
+            var onA = SearchIndex.GetQuery("测试关键词", "biquga");
+            var onB = SearchIndex.GetQuery("测试关键词", "xbiquwk");
+            Check("索引：A 站的缓存还在", onA != null && onA.Count == 1);
+            Check("索引：B 站的缓存独立存在", onB != null && onB.Count == 1);
+            Eq("索引：A 站拿到的是 A 站的书", "沧元图", onA[0].Title);
+            Eq("索引：B 站拿到的是 B 站的书", "另一个站的沧元图", onB[0].Title);
+
+            // 老索引（加站点维度之前写的）没有 site 字段 → 一律当作未命中，
+            // 绝不能把"不知道哪个站搜的"结果当成当前站的结果。
+            Check("索引：缓存站点已知时不兼容判定为 false",
+                SearchIndex.SiteKeyCompatible("biquga", "xbiquwk") == false);
+            Check("索引：缓存站点相同则兼容", SearchIndex.SiteKeyCompatible("biquga", "biquga"));
+            Check("索引：大小写不敏感", SearchIndex.SiteKeyCompatible("BiQuGa", "biquga"));
+            Check("索引：老缓存（site 为空）一律不兼容", !SearchIndex.SiteKeyCompatible(null, "biquga"));
+            Check("索引：查询方站点为空也不兼容", !SearchIndex.SiteKeyCompatible("biquga", null));
 
             // ---- Dir / BookId 必须按站点分派 ----
             //
@@ -1934,7 +2056,9 @@ namespace TomatoBiquga
             Directory.CreateDirectory(dir);
 
             var defs = SiteProfileStore.Defaults();
-            Check("站点配置：有三个内置站点", defs.Count >= 3);
+            // 站点数不再是写死的 3 —— 加书源之后它必须跟着站点注册表走
+            Eq("站点配置：默认站点数与注册表一致", SiteRegistry.Count, defs.Count);
+            Check("站点配置：三个内置站点都在", defs.Count >= 3);
             var m = SiteProfileStore.Get("biquga-m");
             Eq("站点配置：移动版默认并发", 8, m.Workers);
             Check("站点配置：默认编码是 utf-8", m.IsUtf8(m.OutputEncoding));
@@ -1998,7 +2122,7 @@ namespace TomatoBiquga
 
             // 文件不存在/损坏 → 回退默认值，不抛异常
             var none = SiteProfileStore.Load(Path.Combine(dir, "没有这个文件.ini"));
-            Eq("站点配置：文件不存在时回退默认（仍有 3 个站点）", 3, none.Count);
+            Eq("站点配置：文件不存在时回退默认（站点数与注册表一致）", SiteRegistry.Count, none.Count);
             var broken = Path.Combine(dir, "损坏.ini");
             File.WriteAllBytes(broken, new byte[] { 0xFF, 0xFE, 0x00, 0x01, 0x02 });
             bool threw = false;
@@ -2010,7 +2134,510 @@ namespace TomatoBiquga
             SiteProfileStore.SaveSample(sample, SiteProfileStore.Defaults());
             Check("站点配置：样例文件已生成", File.Exists(sample));
             var back = SiteProfileStore.Load(sample);
-            Eq("站点配置：样例能被自己读回（站点数一致）", 3, back.Count);
+            Eq("站点配置：样例能被自己读回（站点数一致）", SiteRegistry.Count, back.Count);
+        }
+
+        // ============================================================
+        //  11.6b) 站点注册表
+        // ============================================================
+
+        private static void TestSiteRegistry()
+        {
+            var all = SiteRegistry.All;
+            Check("站点注册表：至少 3 个站点", all.Count >= 3);
+
+            // Key 唯一
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var d in all)
+                Check("站点注册表：Key 唯一（" + d.Key + "）", seen.Add(d.Key));
+
+            // Key / 显示名 都不为空
+            foreach (var d in all)
+            {
+                Check("站点注册表：Key 非空", !string.IsNullOrEmpty(d.Key));
+                Check("站点注册表：显示名非空（" + d.Key + "）", !string.IsNullOrEmpty(d.DisplayName));
+                Check("站点注册表：有工厂（" + d.Key + "）", d.Factory != null);
+            }
+
+            // 内置三站必须还在 —— 书架上已存的书用它们的 Key
+            Check("站点注册表：番茄存在", SiteRegistry.ByKey("fanqie") != null);
+            Check("站点注册表：笔趣阁移动版存在", SiteRegistry.ByKey("biquga-m") != null);
+            Check("站点注册表：笔趣阁 PC 存在", SiteRegistry.ByKey("biquga") != null);
+
+            // Create → KeyOf 往返必须一致，否则书架/DirCache 会写到错的站点下
+            foreach (var d in all)
+            {
+                var inst = SiteRegistry.Create(d.Key);
+                Check("站点注册表：能造出实例（" + d.Key + "）", inst != null);
+                Eq("站点注册表：Create→KeyOf 往返一致（" + d.Key + "）",
+                    d.Key, SiteRegistry.KeyOf(inst));
+            }
+
+            // IndexOf / LabelOf 往返
+            for (int i = 0; i < all.Count; i++)
+            {
+                Eq("站点注册表：IndexOf 往返（" + all[i].Key + "）", i, SiteRegistry.IndexOf(all[i].Key));
+                Eq("站点注册表：LabelOf（" + all[i].Key + "）", all[i].DisplayName, SiteRegistry.LabelOf(all[i].Key));
+            }
+
+            // 未知 Key 的行为必须是"查不到"，而不是抛异常或返回错的东西
+            Check("站点注册表：未知 Key → ByKey 返回 null", SiteRegistry.ByKey("不存在的站") == null);
+            Check("站点注册表：未知 Key → Create 返回 null", SiteRegistry.Create("不存在的站") == null);
+            Eq("站点注册表：未知 Key → IndexOf 返回 -1", -1, SiteRegistry.IndexOf("不存在的站"));
+            Check("站点注册表：null 站点 → KeyOf 返回 null", SiteRegistry.KeyOf(null) == null);
+            Check("站点注册表：空 Key → ByKey 返回 null", SiteRegistry.ByKey(null) == null);
+
+            // 每次 Create 都必须是新实例（切站不能复用带状态的旧对象）
+            var a1 = SiteRegistry.Create("biquga");
+            var a2 = SiteRegistry.Create("biquga");
+            Check("站点注册表：Create 每次返回新实例", !object.ReferenceEquals(a1, a2));
+        }
+
+        // ============================================================
+        //  11.6c) 规则表自检
+        // ============================================================
+
+        private static void TestSiteRuleTable()
+        {
+            var rules = SiteRules.All();
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in rules)
+            {
+                Check("规则表：Key 唯一（" + r.Key + "）", seen.Add(r.Key));
+
+                // Validate() 里会逐个正则试编译；这里确认它不抛
+                bool ok = true;
+                try { r.Validate(); } catch (Exception) { ok = false; }
+                Check("规则表：自检通过（" + r.Key + "）", ok);
+
+                // 收集器站点必须有基准书名，否则"自动选最快"没法给它打分
+                Check("规则表：有基准书名（" + r.Key + "）", r.KnownTitles != null && r.KnownTitles.Length > 0);
+                Check("规则表：Base 以 / 结尾（" + r.Key + "）", r.Base.EndsWith("/"));
+
+                // 规则表站点必须能被注册表找到，而且两边 Key 一致
+                var d = SiteRegistry.ByKey(r.Key);
+                Check("规则表：已注册进注册表（" + r.Key + "）", d != null);
+                if (d != null)
+                {
+                    Eq("规则表：注册表显示名与规则一致（" + r.Key + "）", r.DisplayName, d.DisplayName);
+                    Check("规则表：注册表带规则对象（" + r.Key + "）", object.ReferenceEquals(d.Rule, r) || d.Rule != null);
+                }
+
+                // 造出来的实例必须是 RuleSite，且 Key 对得上
+                var inst = SiteRegistry.Create(r.Key);
+                var rs = inst as RuleSite;
+                Check("规则表：能造出 RuleSite（" + r.Key + "）", rs != null);
+                if (rs != null) Eq("规则表：实例 Key 一致（" + r.Key + "）", r.Key, rs.Key);
+            }
+        }
+
+        // ============================================================
+        //  11.6d) 规则表站点的解析（离线，用真实抓下来的 HTML 片段）
+        // ============================================================
+
+        /// <summary>
+        /// 找站点样本目录。
+        ///
+        /// 样本放在源码树 tests\站点样本\ 下，**不复制一份进 dist**（那会变成
+        /// 两份会漂移的副本）。所以从 exe 位置往上找源码目录；找不到就跳过这组
+        /// 测试（安装包里的 exe 不该因为没带样本而失败）。
+        /// </summary>
+        private static string FindSiteSampleDir()
+        {
+            try
+            {
+                var d = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+                for (int i = 0; i < 6 && d != null; i++)
+                {
+                    var cand = Path.Combine(d.FullName, "tests", "站点样本");
+                    if (Directory.Exists(cand)) return cand;
+                    d = d.Parent;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void TestRuleSiteParsing()
+        {
+            var dir = FindSiteSampleDir();
+            if (dir == null)
+            {
+                // 不静默跳过 —— 说清楚为什么没跑，否则"全绿"会骗人
+                Check("规则解析：找到站点样本目录（找不到则本组跳过）", true);
+                Console.WriteLine("  [提示] 没找到 tests\\站点样本，跳过规则解析测试。");
+                return;
+            }
+
+            // ---------------- 笔尖中文：搜索页 ----------------
+            var searchHtml = File.ReadAllText(Path.Combine(dir, "xbiquwk_search.html"), Encoding.UTF8);
+            var rule = SiteRules.ByKey("xbiquwk");
+            Check("规则解析：能取到 xbiquwk 规则", rule != null);
+            if (rule != null)
+            {
+                var hits = new List<string>();
+                foreach (Match m in Regex.Matches(searchHtml, rule.BookLinkPatterns[0]))
+                    hits.Add(m.Groups[1].Value);
+                Check("规则解析：搜索页抓到书籍链接", hits.Count >= 2);
+                Eq("规则解析：第一条书籍路径", "/1_1245/", hits.Count > 0 ? hits[0] : "");
+                Check("规则解析：书名能从 <a> 文字取得（表格首行是剑来）",
+                    searchHtml.Contains(">剑来</a>"));
+            }
+
+            // ---------------- 笔尖中文：详情页（= 目录页） ----------------
+            var detailHtml = File.ReadAllText(Path.Combine(dir, "xbiquwk_detail.html"), Encoding.UTF8);
+            Check("规则解析：详情页样本含干扰链接（分类页/排行榜）",
+                detailHtml.Contains("/list/1_1.html") && detailHtml.Contains("paihangbang"));
+
+            if (rule != null)
+            {
+                var block = Regex.Match(detailHtml, rule.TocBlockPattern);
+                Check("规则解析：#list 容器能框出来", block.Success && block.Groups[1].Value.Length > 0);
+                var scope = block.Success ? block.Groups[1].Value : detailHtml;
+
+                var ids = new List<string>();
+                var titles = new List<string>();
+                foreach (Match m in Regex.Matches(scope, rule.TocLinkPattern))
+                {
+                    ids.Add(m.Groups[1].Value);
+                }
+                Eq("规则解析：目录抓到 4 章（样本里就 4 个 dd）", 4, ids.Count);
+                Eq("规则解析：第一章链接", "603316.html", ids.Count > 0 ? ids[0] : "");
+                Check("规则解析：干扰链接没被抓进目录",
+                    !ids.Contains("http://www.xbiquwk.com/list/1_1.html") &&
+                    !ids.Exists(delegate (string x) { return x.IndexOf("paihangbang", StringComparison.Ordinal) >= 0; }));
+
+                // 章节 id 与相对地址拼装
+                var abs = RuleSite.Absolutize(ids.Count > 0 ? ids[0] : "", "http://www.xbiquwk.com/1_1245/");
+                Eq("规则解析：相对章节地址拼成绝对", "http://www.xbiquwk.com/1_1245/603316.html", abs);
+                Eq("规则解析：章节 id", "603316", RuleSite.IdOf(abs));
+                Eq("规则解析：书籍路径", "/1_1245/", RuleSite.PathOf("http://www.xbiquwk.com/1_1245/"));
+            }
+
+            // ---------------- 笔尖中文：正文 ----------------
+            var chHtml = File.ReadAllText(Path.Combine(dir, "xbiquwk_chapter.html"), Encoding.UTF8);
+            Check("规则解析：笔尖中文正文块能匹配",
+                rule != null && Regex.IsMatch(chHtml, rule.ContentPattern, RegexOptions.IgnoreCase));
+            if (rule != null)
+            {
+                var rs = new RuleSite(rule);
+                var text = rs.ChapterTextFromHtml(chHtml);
+                Check("规则解析：笔尖中文正文非空", !string.IsNullOrEmpty(text));
+                if (!string.IsNullOrEmpty(text))
+                {
+                    Check("规则解析：笔尖中文正文含首句「二月二，龙抬头」",
+                        text.IndexOf("二月二，龙抬头", StringComparison.Ordinal) >= 0);
+                    Check("规则解析：笔尖中文正文已去掉 HTML 标签",
+                        text.IndexOf("<br", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        text.IndexOf("&nbsp;", StringComparison.Ordinal) < 0);
+                    Check("规则解析：笔尖中文正文长度合理（>300 字）", text.Length > 300);
+                }
+            }
+
+            // ---------------- 笔趣阁365：搜索页 ----------------
+            var b365search = File.ReadAllText(Path.Combine(dir, "biquge365_search.html"), Encoding.UTF8);
+            var r365 = SiteRules.ByKey("biquge365");
+            Check("规则解析：能取到 biquge365 规则", r365 != null);
+            if (r365 != null)
+            {
+                var books = new List<string>();
+                foreach (Match m in Regex.Matches(b365search, r365.BookLinkPatterns[0]))
+                    books.Add(m.Groups[1].Value);
+                Eq("规则解析：biquge365 搜索抓到 2 本书", 2, books.Count);
+                Eq("规则解析：biquge365 第一本书", "/book/417022/", books.Count > 0 ? books[0] : "");
+
+                // 目录页地址模板：/book/417022/ → /newbook/417022/
+                Eq("规则解析：biquge365 目录页模板", "417022",
+                    RuleSite.IdOf("http://x" + RuleSite.PathOf("https://www.biquge365.net/book/417022/")));
+                Eq("规则解析：书籍路径", "/book/417022/",
+                    RuleSite.PathOf("https://www.biquge365.net/book/417022/"));
+            }
+
+            // ---------------- 笔趣阁365：完整目录页 ----------------
+            var toc365 = File.ReadAllText(Path.Combine(dir, "biquge365_toc.html"), Encoding.UTF8);
+            Check("规则解析：biquge365 目录样本含两类干扰（最新九章侧栏 + 开始阅读）",
+                toc365.Contains("xinchapter") && toc365.Contains("开始阅读"));
+            if (r365 != null)
+            {
+                var block = Regex.Match(toc365, r365.TocBlockPattern);
+                Check("规则解析：biquge365 ul.info 能框出来", block.Success);
+                var scope = block.Success ? block.Groups[1].Value : toc365;
+                var links = new List<string>();
+                var texts = new List<string>();
+                foreach (Match m in Regex.Matches(scope, r365.TocLinkPattern))
+                {
+                    links.Add(m.Groups[1].Value);
+                    texts.Add(m.Groups.Count >= 3 && m.Groups[2].Success
+                        ? Http.StripTags(m.Groups[2].Value).Trim() : "");
+                }
+                Eq("规则解析：biquge365 目录抓到 4 章（样本 4 个 li）", 4, links.Count);
+                Eq("规则解析：biquge365 目录第一章", "/chapter/417022/685327301.html",
+                    links.Count > 0 ? links[0] : "");
+                // ★ 回归：div.gongneng 里有条**指向同一章**的「开始阅读」导航链接。
+                //   旧实现在整页里用 `<a[^>]*href="该URL"...` 再搜一次取标题，
+                //   而 [^>]* 允许跨过 '>'，于是取到了那条导航链接的文字 ——
+                //   实测目录第一项真的变成了「开始阅读」。
+                //   （Python 里同一个正则不会这样匹配，所以拿 Python 验证会误判为没问题。）
+                Check("规则解析：biquge365 首章标题不是「开始阅读」",
+                    texts.Count > 0 && texts[0] != "开始阅读");
+                Eq("规则解析：biquge365 首章标题正确", "第1章 本书设定",
+                    texts.Count > 0 ? texts[0] : "");
+                // 关键：取的是 ul.info（第1章在前），不是 ul.xinchapter（最新章在前）
+                Check("规则解析：取的是完整目录而不是「最新九章」侧栏",
+                    links.Count > 0 && links[0].IndexOf("685327301", StringComparison.Ordinal) >= 0);
+            }
+
+            // ---------------- 笔趣阁365：正文（含水印行） ----------------
+            var b365ch = File.ReadAllText(Path.Combine(dir, "biquge365_chapter.html"), Encoding.UTF8);
+            if (r365 != null)
+            {
+                var rs = new RuleSite(r365);
+                var text = rs.ChapterTextFromHtml(b365ch);
+                Check("规则解析：biquge365 正文非空", !string.IsNullOrEmpty(text));
+                if (!string.IsNullOrEmpty(text))
+                {
+                    Check("规则解析：biquge365 站点水印已被剔除",
+                        text.IndexOf("一秒记住", StringComparison.Ordinal) < 0);
+                    Check("规则解析：biquge365 正文保留真正的开头（“死！”）",
+                        text.IndexOf("“死！”", StringComparison.Ordinal) >= 0);
+                    Check("规则解析：biquge365 正文长度合理（>300 字）", text.Length > 300);
+                }
+            }
+
+            // ---------------- 工具函数边界 ----------------
+            Eq("规则解析：PathOf 容错（无斜杠结尾）", "/book/1/", RuleSite.PathOf("https://a.com/book/1"));
+            Eq("规则解析：PathOf 去掉查询串", "/book/1/", RuleSite.PathOf("https://a.com/book/1/?x=2"));
+            Eq("规则解析：IdOf 去掉扩展名", "603316", RuleSite.IdOf("http://a/1_2/603316.html"));
+            Eq("规则解析：Absolutize 保留绝对地址", "http://b/x.html",
+                RuleSite.Absolutize("http://b/x.html", "http://a/1/"));
+            Eq("规则解析：Absolutize 根相对", "http://a/x.html",
+                RuleSite.Absolutize("/x.html", "http://a/1/2/"));
+            // ★ 页面相对：基准是 base 的目录，不能丢掉 /1_1245/ 这一层
+            //   （CoverFetcher.Absolutize 会拼成 /603316.html —— 那是封面用的语义）
+            Eq("规则解析：Absolutize 页面相对（不丢目录层）", "http://a/1_1245/603316.html",
+                RuleSite.Absolutize("603316.html", "http://a/1_1245/"));
+            Eq("规则解析：Absolutize 归一 ../", "http://a/1/x.html",
+                RuleSite.Absolutize("../x.html", "http://a/1/2/"));
+            Eq("规则解析：Absolutize 协议相对", "https://a/x.html",
+                RuleSite.Absolutize("//a/x.html", "https://b/1/"));
+            Eq("规则解析：Absolutize 根路径不被 .. 越过", "http://a/x.html",
+                RuleSite.Absolutize("../../../x.html", "http://a/1/2/"));
+        }
+
+        // ============================================================
+        //  11.6e) 站点速度评分与「自动选最快」
+        // ============================================================
+
+        private static void TestSiteRating(string work)
+        {
+            // ---------- 综合分 = 搜索 + 目录 + 正文，升序 ----------
+            // ★ 用**注册表里真实存在**的 Key：FastestKey 会校验 Key 是否已注册
+            //   （不认识的 Key 不能当成"可用的最快站点"，否则界面会去造一个
+            //   根本不存在的站点对象）。用假 Key 测出来的 null 不是 bug。
+            var a = SiteScore.Measured("xbiquwk", "笔尖中文", 100, 200, 300);
+            var b = SiteScore.Measured("biquga", "笔趣阁PC", 500, 100, 100);
+            var dead = new SiteScore { Key = "biquge365", DisplayName = "笔趣阁365", Error = "挂了" };
+            Eq("评分：综合分是三项之和", 600.0, a.TotalMs);
+            Eq("评分：综合分是三项之和（乙）", 700.0, b.TotalMs);
+            Check("评分：SearchMs=0 也算有效", SiteScore.Measured("x", "", 0, 1, 1).Ok);
+            Check("评分：有 Error 就算不可用", !dead.Ok);
+            Check("评分：三项全 Infinity 不可用", !new SiteScore { Key = "x" }.Ok);
+
+            // ---------- 排名：可用的在前，按分数升序 ----------
+            var ranked = SiteRater.Rank(new List<SiteScore> { dead, b, a });
+            Eq("排名：3 项", 3, ranked.Count);
+            Eq("排名：第 1 是最快的笔尖中文", "xbiquwk", ranked[0].Key);
+            Eq("排名：第 2 是笔趣阁PC", "biquga", ranked[1].Key);
+            Eq("排名：不可用的排最后", "biquge365", ranked[2].Key);
+            Eq("排名：最快站点 Key", "xbiquwk", SiteRater.FastestKey(new List<SiteScore> { dead, b, a }));
+
+            // ---------- 全不可用 → FastestKey 返回 null（调用方回退） ----------
+            Check("排名：全不可用时 FastestKey 返回 null",
+                SiteRater.FastestKey(new List<SiteScore> { dead }) == null);
+            Check("排名：空表 FastestKey 返回 null", SiteRater.FastestKey(new List<SiteScore>()) == null);
+
+            // ★ 未注册的 Key 即使分再低也不能被选中 —— 否则界面会拿它去造站点对象
+            var ghost = SiteScore.Measured("没这个站", "", 1, 1, 1);
+            Check("排名：未注册的 Key 不会被选为最快",
+                SiteRater.FastestKey(new List<SiteScore> { ghost }) == null);
+            Eq("排名：未注册的 Key 与已注册的一起时，选已注册的那个", "biquga",
+                SiteRater.FastestKey(new List<SiteScore> { ghost, b }));
+
+            // ---------- 全不可用 → FastestKey 返回 null（调用方回退） ----------
+            Check("排名：全不可用时 FastestKey 返回 null",
+                SiteRater.FastestKey(new List<SiteScore> { dead }) == null);
+            Check("排名：空表 FastestKey 返回 null", SiteRater.FastestKey(new List<SiteScore>()) == null);
+
+            // ---------- 缓存新鲜度 ----------
+            var fresh = new List<SiteScore> { new SiteScore { Key = "a", MeasuredAt = DateTime.Now } };
+            Check("评分：刚测的算新鲜", SiteRater.IsFresh(fresh));
+            var stale = new List<SiteScore>
+            {
+                new SiteScore { Key = "a", MeasuredAt = DateTime.Now.AddHours(-SiteRater.MaxAgeHours - 1) }
+            };
+            Check("评分：超过 24 小时算过期", !SiteRater.IsFresh(stale));
+            Check("评分：空表不算新鲜", !SiteRater.IsFresh(null));
+
+            // ★ 回归：时间戳必须无损往返。
+            //   原来写出时用 {4:F0}（四舍五入的毫秒）、读回却当 Ticks 用，
+            //   于是读回的时间比原值早最多 1 秒 → IsFresh 判过期 →
+            //   表现是"每次启动都重测一遍"。Ticks 是 100ns 单位，不能丢精度。
+            var exact = new List<SiteScore> { SiteScore.Measured("xbiquwk", "笔尖中文", 1, 1, 1) };
+            exact[0].MeasuredAt = new DateTime(2026, 10, 14, 12, 34, 56, 789).AddTicks(1234);
+            var iniExact = Path.Combine(work, "rating", "时间戳.ini");
+            SiteRater.Save(exact, iniExact);
+            var exactBack = SiteRater.Load(iniExact);
+            Check("评分：时间戳能读回", exactBack != null && exactBack.Count == 1);
+            if (exactBack != null && exactBack.Count == 1)
+                Eq("评分：时间戳精确往返（不丢 Ticks）",
+                    exact[0].MeasuredAt.Ticks, exactBack[0].MeasuredAt.Ticks);
+            Check("评分：读回后仍算新鲜（同一次实测）", SiteRater.IsFresh(exactBack));
+
+            // ★ 回归：0 绝不能冒充"测得很快"。
+            //   实测笔趣阁 PC 版会出现"目录测到了、正文没测到"的中间态；
+            //   那时 ChapterMs 留 0，结果总分变成一个看起来正常的小数，
+            //   排名里显示成像"它只是有点慢"，而实际它不可用。
+            var partial = new SiteScore { Key = "x", SearchMs = 100, TocMs = 200, MeasuredAt = DateTime.Now };
+            partial.SearchMeasured = true;
+            partial.TocMeasured = true;
+            // ChapterMeasured 故意不置位
+            partial.MarkUnmeasured();
+            Check("评分：没测到的项记成 ∞ 而不是 0", double.IsInfinity(partial.ChapterMs));
+            Check("评分：有未测项的站点算不可用", !partial.Ok);
+            Check("评分：未测项不能拖低总分", double.IsInfinity(partial.TotalMs));
+            // ---------- 关键词选取 ----------
+            var ruleSite = SiteRegistry.ByKey("xbiquwk");
+            if (ruleSite != null)
+                Eq("评分：规则表站点用自己声明并实测过的书名", "剑来", SiteRater.KeywordFor(ruleSite));
+            var fanqie = SiteRegistry.ByKey("fanqie");
+            if (fanqie != null)
+                Check("评分：番茄没有可评测的关键词搜索", string.IsNullOrEmpty(SiteRater.KeywordFor(fanqie)));
+
+            // ---------- 写盘 / 读回 往返 ----------
+            var dir = Path.Combine(work, "rating");
+            Directory.CreateDirectory(dir);
+            var ini = Path.Combine(dir, "站点配置.ini");
+
+            var scores = new List<SiteScore>();
+            var okScore = SiteScore.Measured("xbiquwk", "笔尖中文", 500, 647, 608);
+            okScore.TocCount = 1308;
+            okScore.SampleTitle = "剑来,测试";
+            scores.Add(okScore);
+            scores.Add(new SiteScore { Key = "biquge365", DisplayName = "笔趣阁365", Error = "搜索无结果",
+                                       MeasuredAt = DateTime.Now });
+            SiteRater.Save(scores, ini);
+            Check("评分：ini 已写入", File.Exists(ini));
+            var text = File.ReadAllText(ini, Encoding.UTF8);
+            Check("评分：ini 里有 [评分] 段", text.Contains("[评分]"));
+            Check("评分：ini 里存了站点行", text.Contains("xbiquwk="));
+
+            var back = SiteRater.Load(ini);
+            Check("评分：能从 ini 读回", back != null && back.Count == 2);
+            if (back != null && back.Count == 2)
+            {
+                SiteScore x = null, g = null;
+                foreach (var s in back) { if (s.Key == "xbiquwk") x = s; if (s.Key == "biquge365") g = s; }
+                Check("评分：读回笔尖中文", x != null);
+                if (x != null)
+                {
+                    Eq("评分：搜索耗时往返", 500.0, x.SearchMs);
+                    Eq("评分：目录耗时往返", 647.0, x.TocMs);
+                    Eq("评分：正文耗时往返", 608.0, x.ChapterMs);
+                    Eq("评分：章数往返", 1308, x.TocCount);
+                    Check("评分：书名里的逗号不破坏格式", x.SampleTitle.IndexOf("剑来") >= 0);
+                    Check("评分：读回后仍算可用", x.Ok);
+                }
+                Check("评分：读回不可用站点仍然是不可用", g != null && !g.Ok);
+            }
+
+            // ---------- 覆盖写不会留下重复段 ----------
+            SiteRater.Save(scores, ini);
+            var text2 = File.ReadAllText(ini, Encoding.UTF8);
+            int n = 0, idx = 0;
+            while ((idx = text2.IndexOf("[评分]", idx, StringComparison.Ordinal)) >= 0) { n++; idx += 4; }
+            Eq("评分：重复保存不会产生第二个 [评分] 段", 1, n);
+
+            // ---------- 与别的段共存：不能吃掉站点的配置段 ----------
+            File.WriteAllText(ini, "[biquga-m]\r\nworkers=12\r\n\r\n[评分]\r\nbiquga=1,2,3,4,0,x\r\n",
+                new UTF8Encoding(true));
+            SiteRater.Save(scores, ini);
+            var text3 = File.ReadAllText(ini, Encoding.UTF8);
+            Check("评分：保存后 [biquga-m] 段还在", text3.Contains("[biquga-m]") && text3.Contains("workers=12"));
+
+            // ---------- 损坏文件不能抛 ----------
+            var broken = Path.Combine(dir, "坏.ini");
+            File.WriteAllBytes(broken, new byte[] { 0xFF, 0xFE, 0x00, 0x01 });
+            bool threw = false;
+            try { SiteRater.Load(broken); } catch { threw = true; }
+            Check("评分：损坏的 ini 不抛异常", !threw);
+
+            // ---------- 界面：自动模式必须真的选中最快的那个 ----------
+            TestAutoSiteSelection();
+        }
+
+        /// <summary>
+        /// 界面级验证：喂一份假评分，打开「自动选最快」，
+        /// 断言 MainForm **实际生效的站点**就是分最低的那个。
+        /// 这是"自动选最快"唯一算数的验收方式 —— 只测 SiteRater 的排序
+        /// 证明不了界面真的用了它。
+        /// </summary>
+        private static void TestAutoSiteSelection()
+        {
+            MainForm form = null;
+            try
+            {
+                form = new MainForm();
+                form.SuppressDialogs = true;      // 绝不联网、绝不弹窗
+            }
+            catch (Exception ex)
+            {
+                Check("自动选站：能构造主窗体（" + ex.Message + "）", false);
+                return;
+            }
+
+            try
+            {
+                // 让"笔尖中文"分最低 → 自动模式应当选它
+                var scores = new List<SiteScore>
+                {
+                    SiteScore.Measured("biquga", "", 900, 900, 900),
+                    SiteScore.Measured("xbiquwk", "", 100, 100, 100),
+                    new SiteScore { Key = "biquge365", Error = "挂了", MeasuredAt = DateTime.Now },
+                };
+                form.ApplyAutoSiteForTest(scores, true);
+                Eq("自动选站：选中了分最低的笔尖中文", "xbiquwk", form.EffectiveSiteKeyForTest());
+
+                // 把笔尖中文改成最慢 → 应当换成笔趣阁 PC
+                var scores2 = new List<SiteScore>
+                {
+                    SiteScore.Measured("biquga", "", 10, 10, 10),
+                    SiteScore.Measured("xbiquwk", "", 900, 900, 900),
+                };
+                form.ApplyAutoSiteForTest(scores2, true);
+                Eq("自动选站：换了最慢之后改选笔趣阁", "biquga", form.EffectiveSiteKeyForTest());
+
+                // 全不可用 → 回退到内置笔趣阁 PC 版（不是崩溃、也不是乱选）
+                var allDead = new List<SiteScore>
+                {
+                    new SiteScore { Key = "xbiquwk", Error = "挂了", MeasuredAt = DateTime.Now },
+                };
+                form.ApplyAutoSiteForTest(allDead, true);
+                Eq("自动选站：全不可用时回退到笔趣阁 PC", "biquga", form.EffectiveSiteKeyForTest());
+
+                // 没有任何评分数据 → 同样回退，不能抛
+                form.ApplyAutoSiteForTest(null, true);
+                Eq("自动选站：没有评分数据时回退", "biquga", form.EffectiveSiteKeyForTest());
+
+                // 关掉自动 → 回到手动选择的站点
+                form.ApplyAutoSiteForTest(scores, false);
+                form.SelectSiteForTest(SiteRegistry.IndexOf("biquga-m"));
+                Eq("自动选站：关闭后回到手动选择", "biquga-m", form.EffectiveSiteKeyForTest());
+            }
+            finally
+            {
+                try { form.Dispose(); } catch { }
+            }
         }
 
         // ============================================================
@@ -2965,6 +3592,51 @@ namespace TomatoBiquga
             Eq("状态码：000（curl 连接失败）→ 0", 0, Http.ParseHttpCode("000"));
             Eq("状态码：99 不合法 → 0", 0, Http.ParseHttpCode("99"));
             Eq("状态码：600 不合法 → 0", 0, Http.ParseHttpCode("600"));
+        }
+
+        // ============================================================
+        //  11.x) 请求重试判据与 .NET 回退跳过
+        // ============================================================
+
+        private static void TestRetryPolicy()
+        {
+            // 该重试的：服务器"现在不行"
+            Check("重试：429 限流该重试", Http.IsRetryableStatus(429));
+            Check("重试：503 服务不可用该重试", Http.IsRetryableStatus(503));
+            // ★ 502 是实测加的：笔趣阁源站会间歇性回 nginx 502
+            Check("重试：502 网关错误该重试", Http.IsRetryableStatus(502));
+
+            // 不该重试的：重试没意义，或会被当成攻击
+            Check("重试：403 不该走重试（换后端/重试都解决不了）", !Http.IsRetryableStatus(403));
+            Check("重试：404 不该重试", !Http.IsRetryableStatus(404));
+            Check("重试：500 不在此列（站点内部错误，退避也未必有用）", !Http.IsRetryableStatus(500));
+            Check("重试：200 当然不重试", !Http.IsRetryableStatus(200));
+            Check("重试：0（状态码未知）不重试", !Http.IsRetryableStatus(0));
+
+            // ---------- .NET 回退跳过：只在"确认是 TLS/协议层拒绝"时才记 ----------
+            const string host = "https://schannel-test.example.com/a/b";
+            Check("回退跳过：一开始没被标记", !Http.SchannelRejectedForTest(host));
+
+            // 普通超时**不该**被当成"永远别用 .NET" —— 否则回退机制就废了
+            Http.NoteSchannelRejectedForTest(host, "请求超时");
+            Check("回退跳过：普通超时不会被标记", !Http.SchannelRejectedForTest(host));
+
+            // TLS 层错误要标记
+            Http.NoteSchannelRejectedForTest(host, "Received an unexpected EOF or 0 bytes from the transport stream.");
+            Check("回退跳过：TLS 层错误会被标记", Http.SchannelRejectedForTest(host));
+
+            // 标记按主机隔离：别的域名不受连累
+            Check("回退跳过：别的域名不受影响",
+                !Http.SchannelRejectedForTest("https://other.example.com/x"));
+
+            // 空错误信息不能标记
+            Http.NoteSchannelRejectedForTest("https://empty.example.com/", "");
+            Check("回退跳过：空错误信息不标记", !Http.SchannelRejectedForTest("https://empty.example.com/"));
+
+            // 非法 URL 不能抛
+            bool threw = false;
+            try { Http.SchannelRejectedForTest("这不是URL"); } catch { threw = true; }
+            Check("回退跳过：非法 URL 不抛异常", !threw);
         }
 
         // ============================================================

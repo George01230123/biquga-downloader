@@ -36,6 +36,7 @@ namespace TomatoBiquga
         private ISite _site;
         private SplitContainer _split;
         private CheckBox chkOffline;
+        private CheckBox chkAutoSite;
         private AppSettings _settings;     // 并发/间隔/重试，来自 exe 同目录的 settings.ini
         private SiteProfile _profile;      // 当前站点的连接参数（站点配置.ini，可手改）
         private string _lastOfficialFile;   // 官方工具最近一次的输出文件（用于「打开保存目录」）
@@ -135,11 +136,15 @@ namespace TomatoBiquga
             cboSite = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Width = 150,
+                // 站点名可能更长（"笔趣阁（移动版·快）" / "笔尖中文"），150 会截断
+                Width = 176,
                 Margin = new Padding(0, 1, 10, 0),
             };
-            cboSite.Items.AddRange(new object[] { "番茄小说", "笔趣阁（移动版·快）", "笔趣阁（PC版·慢）" });
-            cboSite.SelectedIndex = 0;
+            // 只把站点名填进下拉框 —— 这里**不能**走 ReloadSiteCombo：
+            // 那个会调用 UpdateSiteHint，而本方法在构造函数很靠前的位置执行，
+            // 那时 _settings / _profile / chkOffline 等还没建好，会空引用崩掉
+            // （实测直接把全部布局体检测试打挂了）。真正的初始化在构造函数末尾。
+            PopulateSiteCombo(CoreSiteKey);
 
             var lblKw = new Label { Text = "书名 / 链接：", AutoSize = true, Margin = new Padding(0, 6, 2, 0) };
             // 关键词框吃掉剩余宽度：窗口再宽也不会留一块空白（宽度在 LayoutInlineTweaks 里算）
@@ -158,6 +163,32 @@ namespace TomatoBiquga
                 "索引靠用过的记录积累，不是全站书目 —— 找不到就点「搜索」联网查（结果会自动入库）。");
             btnLoad = MakeButton("载入目录", 64, (s, e) => DoLoadBook());
             btnReload = MakeButton("刷新目录", 64, (s, e) => DoLoadBookRefresh());
+
+            // 「自动选最快」放在**第二行**，不放站点选择旁边：
+            // 第一行在最小窗口宽度（820）下已经排满，再塞一个复选框会把
+            // 「刷新目录」挤出右边界（实测布局体检直接报"Button 越界"）。
+            // 第二行本来就是设置类控件（保存到 / 浏览 / 设置），还有富余。
+            // 标签刻意用最短的「自动」：第 2 行在最小窗口宽度（820px）下只剩
+            // 约 60px 富余，写「自动选最快」会把「离线模式」挤出右边界（实测越界）。
+            // 完整含义放在 tooltip 和日志里。
+            chkAutoSite = new CheckBox
+            {
+                Text = "自动",
+                AutoSize = true,
+                Margin = new Padding(10, 5, 0, 0),
+            };
+            new ToolTip().SetToolTip(chkAutoSite,
+                "【自动选最快】按实测综合分（搜索 + 载入目录 + 抓一章正文）自动挑最快的站点。\n" +
+                "启动时在后台实测一次，结果缓存 24 小时；点「检测站点」可立即重测。\n" +
+                "全部站点都不可用时，自动回退到笔趣阁（PC版）。");
+            chkAutoSite.CheckedChanged += (s, e) =>
+            {
+                _autoSite = chkAutoSite.Checked;
+                if (_autoSite) EnsureScores();
+                ApplySiteSelection();
+                if (_autoSite) Log("已开启「自动选最快」：当前使用「" + CurrentDescriptor.DisplayName + "」。");
+                else Log("已关闭「自动选最快」，改回手动选择站点。");
+            };
 
             row1.Controls.AddRange(new Control[] { lblSite, cboSite, lblKw, kwHost, btnSearch, btnLocal, btnLoad, btnReload });
 
@@ -195,7 +226,9 @@ namespace TomatoBiquga
                 "不再发生任何网络请求（下 700 章只需几秒）。\n" +
                 "不勾：目录能秒开（走本地缓存），但下载时要再联网抓一遍正文。");
 
-            row2.Controls.AddRange(new Control[] { lblOut, outHost, btnBrowse, btnSettings, chkOffline });
+            // 自动选最快：放在与站点**同一行**的语义位置（站点选择区），
+            // 但物理上排在第 2 行 —— 第 1 行在 820px 下已排满，塞不下。
+            row2.Controls.AddRange(new Control[] { lblOut, outHost, btnBrowse, btnSettings, chkAutoSite, chkOffline });
 
             // 第 4 行（固定显示）：书架 / 任务队列 / 检查更新 / 繁简转换。
             // 为什么不塞进第 2 行：最小窗口 820px 时第 2 行可用宽只有 780px，
@@ -436,15 +469,31 @@ namespace TomatoBiquga
             };
             Resize += (s, e) => LayoutInlineTweaks();
 
-            cboSite.SelectedIndexChanged += (s, e) => UpdateSiteHint();
-            UpdateSiteHint();
+            // 下拉框选中变化 → 把选择同步给"自动选最快"复选框（用户在手动接管），
+            // 然后重建站点对象。真正的重建逻辑都在 ApplySiteSelection 里。
+            cboSite.SelectedIndexChanged += (s, e) =>
+            {
+                if (_reloadingSites) return;
+                if (_autoSite && chkAutoSite != null && chkAutoSite.Checked)
+                {
+                    // 自动模式下用户不需要手动选站：把勾去掉，交回手动
+                    chkAutoSite.Checked = false;
+                }
+                ApplySiteSelection();
+            };
+            ReloadSiteCombo(null);      // 内部会调用 UpdateSiteHint
             ApplySettings();
             Log("工具已就绪。");
             Log("取数后端：" + (Http.CurlAvailable ? "系统自带 curl（" + Http.CurlPath + "）" : "内置 .NET 请求（未找到 curl.exe）"));
-            // 启动后在后台探活三个站点，把不可用的标注出来。
+            // 启动后在后台探活全部站点，把不可用的标注出来。
             // 不阻塞启动、也不改动用户的选择（只标注 + 在日志里给降级建议）。
             if (!SuppressDialogs && IsHandleCreated)
+            {
                 BeginInvoke(new Action(ProbeSitesAsync));
+                // 「自动选最快」还没测过就先测一次（缓存新鲜则不重复测）。
+                // 放在后台：每站 3 个请求，绝不能让窗口卡着不出来。
+                if (_autoSite) BeginInvoke(new Action(delegate { RateSitesAsync(false); }));
+            }
             Log("当前设置：" + _settings + "（改这些点上面的「设置」按钮，或直接编辑 " + AppSettings.FileName + "）");
             if (!System.IO.File.Exists(SiteProfileStore.DefaultPath))
             {
@@ -470,6 +519,24 @@ namespace TomatoBiquga
             cboSite.SelectedIndex = index;
             PerformLayout();
             LayoutInlineTweaks();
+        }
+
+        /// <summary>
+        /// 仅供自动化测试：喂一份**假的**评分表并打开「自动选最快」，
+        /// 用来验证"自动模式确实选了分最低的那个站点"。**不联网**。
+        /// </summary>
+        internal void ApplyAutoSiteForTest(List<SiteScore> scores, bool on)
+        {
+            _siteScores = scores;
+            _autoSite = on;
+            if (chkAutoSite != null) chkAutoSite.Checked = on;
+            ApplySiteSelection();
+        }
+
+        /// <summary>仅供自动化测试：当前实际生效的站点 Key</summary>
+        internal string EffectiveSiteKeyForTest()
+        {
+            return EffectiveSiteKey();
         }
 
         /// <summary>
@@ -541,14 +608,17 @@ namespace TomatoBiquga
 
         private void UpdateSiteHint()
         {
-            bool fanqie = cboSite.SelectedIndex == 0;
-            bool mobile = cboSite.SelectedIndex == 1;
+            var desc = CurrentDescriptor;
+            string key = desc == null ? CoreSiteKey : desc.Key;
+            bool fanqie = key == "fanqie";
+            bool canSearch = desc != null && desc.Has(SiteCapabilities.Search);
+
             txtKeyword.Text = "";
             WatermarkExt.SetHint(txtKeyword,
-                fanqie ? "粘贴番茄书籍链接或 book_id" : "输入中文书名，例如：牧神记", this);
-            _site = fanqie ? (ISite)new FanqieSite()
-                 : mobile ? (ISite)new BiqugaMobileSite()
-                 : (ISite)new BiqugaSite();
+                fanqie ? "粘贴番茄书籍链接或 book_id"
+                       : (canSearch ? "输入中文书名，例如：牧神记" : "粘贴书籍地址"),
+                this);
+            _site = desc != null ? desc.Factory() : SiteRegistry.Create(CoreSiteKey);
             _profile = SiteProfileStore.Get(SiteKeyOf(_site));
             ApplySettings();
             if (btnWebSearch != null) btnWebSearch.Enabled = fanqie;
@@ -735,10 +805,14 @@ namespace TomatoBiquga
             if (kw.Length == 0) { MessageBox.Show("请输入书名或链接"); return; }
 
             var site = _site;
+            // 本次搜索实际用的站点 Key —— 缓存要按站点分开存，否则切站后会
+            // 直接返回上一个站点的结果（拿到错的书籍地址去请求另一个站）。
+            string searchSiteKey = SiteKeyOf(site);
             RunBackground("搜索中…", () =>
             {
                 // ① 先查本地缓存：搜过的词直接秒回，不再打站点
-                var cached = SearchIndex.GetQuery(kw);
+                //    （缓存带站点维度：同词不同站是两条记录）
+                var cached = SearchIndex.GetQuery(kw, searchSiteKey);
                 if (cached != null)
                 {
                     Log("搜索「" + kw + "」—— 命中本地缓存（" + cached.Count + " 条），未联网。");
@@ -748,7 +822,7 @@ namespace TomatoBiquga
 
                 var list = site.Search(kw, Log);
                 // ② 结果落盘：这次搜索下次能重放，同时把书并进累积索引
-                if (list != null && list.Count > 0) SearchIndex.PutQuery(kw, list);
+                if (list != null && list.Count > 0) SearchIndex.PutQuery(kw, list, searchSiteKey);
                 FillBooks(list);
                 if (list.Count == 0)
                 {
@@ -881,7 +955,9 @@ namespace TomatoBiquga
             {
                 bq.ForceRefresh = force || offline;
                 bq.Offline = offline;
-                bq.CrawlWorkers = _settings.BiqugaPcWorkers;
+                // 注意：这里**没有**并发设置 —— 笔趣阁 PC 版的目录遍历是
+                // 反向链条（下一页地址写在当前页 HTML 里），结构上不能并发。
+                // 想快就换源（笔尖中文一页给全目录）。见 BiqugaSite.cs 顶部注释。
                 // 续爬：只有在"这本书确实有断点"时才打开，否则会白读一次不存在的断点文件
                 bq.Resume = _resumeBookDir != null &&
                             string.Equals(_resumeBookDir, bq.CurrentDir, StringComparison.Ordinal);
@@ -929,28 +1005,157 @@ namespace TomatoBiquga
             if (bm != null)
                 bm.Workers = chkOffline != null && chkOffline.Checked
                     ? _settings.BiqugaOfflineWorkers : _settings.BiqugaOnlineWorkers;
-            var bq = _site as BiqugaSite;
-            if (bq != null) bq.CrawlWorkers = _settings.BiqugaPcWorkers;
-            // 站点配置里明确写了 workers 就用它（用户手改的优先级最高）
+
+            // 站点配置里明确写了 workers 就用它（用户手改的优先级最高）。
+            //
+            // ★ 只作用于**移动版**（它的目录页能并发抓）。
+            //   PC 版的目录遍历是"反向链条"：第 N-1 页的地址只写在第 N 页的 HTML 里
+            //   （`var uiiekp0do`），必须先取到第 N 页才知道下一页取什么 ——
+            //   **结构上无法并发**。原来这里给 BiqugaSite.CrawlWorkers 赋值，
+            //   但那个字段全项目没有任何地方读它，是个骗人的旋钮
+            //   （docs/架构.md 还照着它写了"PC 版目录遍历用 CrawlWorkers"，
+            //   描述的是一段不存在的行为）。该字段已删除。
             if (prof != null && prof.Workers > 0)
             {
                 if (bm != null) bm.Workers = prof.Workers;
-                if (bq != null) bq.CrawlWorkers = prof.Workers;
             }
         }
 
         /// <summary>把当前站点映射到站点配置里的 key</summary>
         private static string SiteKeyOf(ISite site)
         {
-            if (site == null) return "biquga-m";
-            if (site is FanqieSite) return "fanqie";
-            if (site is BiqugaMobileSite) return "biquga-m";
-            return "biquga";
+            // 站点列表的唯一真相来源是 SiteRegistry。这里以前是一串 if，
+            // 每加一个站点就会漏掉一处（而且 BiqugaMobileSite 的顺序错了会静默归到 PC 版）。
+            string k = SiteRegistry.KeyOf(site);
+            return k == null ? CoreSiteKey : k;
+        }
+
+        // ============================================================
+        //  站点注册表接入
+        // ============================================================
+
+        /// <summary>找不到站点时的兜底（只在注册表被改坏时才会用到）</summary>
+        private const string CoreSiteKey = "biquga";
+
+        /// <summary>重填下拉框期间不要触发事件（否则会递归）</summary>
+        private bool _reloadingSites;
+
+        /// <summary>「自动选最快」开关</summary>
+        private bool _autoSite;
+
+        /// <summary>实测出来的评分表；null = 还没测过</summary>
+        private List<SiteScore> _siteScores;
+
+        /// <summary>正在实测评分</summary>
+        private bool _rating;
+
+        /// <summary>去掉"（当前不可用）"后缀的纯站点名，解决"名字前后空格对不上"</summary>
+        private static string CleanSiteLabel(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            int i = s.IndexOf("（当前不可用）", StringComparison.Ordinal);
+            if (i < 0) i = s.IndexOf("(当前不可用)", StringComparison.Ordinal);
+            return (i >= 0 ? s.Substring(0, i) : s).Trim();
+        }
+
+        /// <summary>当前该用哪个站点 Key（考虑"自动选最快"）</summary>
+        private string EffectiveSiteKey()
+        {
+            if (_autoSite)
+            {
+                string fast = SiteRater.FastestKey(_siteScores);
+                if (!string.IsNullOrEmpty(fast)) return fast;
+                // 评分还没有（或全不可用）→ 回退到内置笔趣阁 PC 版，
+                // 也就是"自动"打开之前的老行为，不会让用户突然没得用。
+                return CoreSiteKey;
+            }
+            int idx = cboSite == null ? -1 : cboSite.SelectedIndex;
+            var all = SiteRegistry.All;
+            if (idx >= 0 && idx < all.Count) return all[idx].Key;
+            return CoreSiteKey;
+        }
+
+        /// <summary>当前生效的站点描述（永远非 null）</summary>
+        private SiteDescriptor CurrentDescriptor
+        {
+            get
+            {
+                var d = SiteRegistry.ByKey(EffectiveSiteKey());
+                if (d == null) d = SiteRegistry.ByKey(CoreSiteKey);
+                return d;
+            }
         }
 
         /// <summary>
-        /// 下载阶段的并发数（并发抓取正文 + 按目录顺序落盘，见 DownloadRunner.Workers）。
-        /// 取值规则和目录遍历保持一致：站点配置.ini 里写了 workers 就用它（用户手改优先），
+        /// 站点列表变了、探活结果变了、或"自动"开关动了之后，把下拉框与
+        /// 当前站点对象重新对齐。**所有**改站点的路径最后都走这里。
+        /// </summary>
+        private void ApplySiteSelection()
+        {
+            if (cboSite == null) return;
+            string key = EffectiveSiteKey();
+            int idx = SiteRegistry.IndexOf(key);
+
+            _reloadingSites = true;
+            try
+            {
+                if (idx >= 0 && idx < cboSite.Items.Count && cboSite.SelectedIndex != idx)
+                    cboSite.SelectedIndex = idx;
+            }
+            finally { _reloadingSites = false; }
+
+            UpdateSiteHint();
+        }
+
+        /// <summary>
+        /// **只**填下拉框条目并定位到 selectKey，不碰任何别的状态。
+        /// 构造函数早期用它（那时其他字段还没建好，不能调 UpdateSiteHint）。
+        /// </summary>
+        private void PopulateSiteCombo(string selectKey)
+        {
+            if (cboSite == null) return;
+            int keep = SiteRegistry.IndexOf(selectKey);
+            if (keep < 0) keep = Math.Max(0, SiteRegistry.IndexOf(CoreSiteKey));
+
+            _reloadingSites = true;
+            try
+            {
+                cboSite.BeginUpdate();
+                try
+                {
+                    cboSite.Items.Clear();
+                    foreach (var d in SiteRegistry.All)
+                        cboSite.Items.Add(d.DisplayName);
+                    if (cboSite.Items.Count > 0)
+                        cboSite.SelectedIndex = Math.Min(keep, cboSite.Items.Count - 1);
+                }
+                finally { cboSite.EndUpdate(); }
+            }
+            finally { _reloadingSites = false; }
+        }
+
+        /// <summary>
+        /// 重建下拉框内容。站点列表变了、或探活结果变了都走这里 ——
+        /// 这样"下拉框里有哪些站"永远和 SiteRegistry 一致。
+        ///
+        /// selectKey 传 null = 沿用当前生效的站点。
+        /// </summary>
+        private void ReloadSiteCombo(string selectKey)
+        {
+            if (cboSite == null) return;
+            PopulateSiteCombo(selectKey ?? EffectiveSiteKey());
+            UpdateSiteHint();       // 不依赖 SelectedIndexChanged（它可能因为下标没变而不触发）
+        }
+
+        /// <summary>
+        /// **下载阶段**的并发数（并发抓取正文 + 按目录顺序落盘，见 DownloadRunner.Workers）。
+        ///
+        /// ★ 注意这只影响下载，不影响载入目录：
+        ///   下载时**所有章节地址事先都知道**（目录已经拿到了），所以能并发；
+        ///   而笔趣阁 PC 版的目录遍历是反向链条，结构上串行（见 BiqugaSite.cs）。
+        ///   所以这个值调大，是"下得快"，不是"目录载入得快"。
+        ///
+        /// 取值规则：站点配置.ini 里写了 workers 就用它（用户手改优先），
         /// 否则按站点取设置里的并发值。
         ///
         /// 番茄保持 1（串行）：它的正文风控对并发最敏感，而且正文本来就要靠第三方核心，
@@ -1631,7 +1836,7 @@ namespace TomatoBiquga
         internal void DownloadCore(ISite site, BookInfo book, List<ChapterInfo> chapters, string root)
         {
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
             Log("准备写入：" + txtPath);
             Log("（如果这个路径不是你想要的，请用上面的「浏览…」改「保存到」）");
 
@@ -1791,7 +1996,7 @@ namespace TomatoBiquga
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
 
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
             if (!File.Exists(txtPath))
             {
                 MessageBox.Show("这本书还没有下载过（找不到文件）：\n" + txtPath +
@@ -1894,7 +2099,7 @@ namespace TomatoBiquga
             string root = txtOutput.Text.Trim();
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
 
             var chapters = new List<ChapterInfo>();
             foreach (var c in book.Chapters)
@@ -2028,7 +2233,7 @@ namespace TomatoBiquga
             string root = txtOutput.Text.Trim();
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
 
             if (!File.Exists(txtPath))
             {
@@ -2122,7 +2327,7 @@ namespace TomatoBiquga
             string root = txtOutput.Text.Trim();
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
 
             var chapters = new List<ChapterInfo>();
             foreach (var c in book.Chapters)
@@ -2415,9 +2620,13 @@ namespace TomatoBiquga
         //  站点探活与自动降级
         // ============================================================
 
-        /// <summary>站点名（不带可用性后缀），下标与 cboSite 一致</summary>
-        private static readonly string[] SiteLabels =
-            new[] { "番茄小说", "笔趣阁（移动版·快）", "笔趣阁（PC版·慢）" };
+        /// <summary>下拉框第 i 项的站点名（不带可用性后缀），来自注册表</summary>
+        private static string SiteLabelAt(int index)
+        {
+            var all = SiteRegistry.All;
+            if (index < 0 || index >= all.Count) return "";
+            return all[index].DisplayName;
+        }
 
         /// <summary>探活结果：站点下标 → 不可用原因（null = 可用）</summary>
         private readonly Dictionary<int, string> _siteDown = new Dictionary<int, string>();
@@ -2442,10 +2651,11 @@ namespace TomatoBiquga
             RunBackground("检测站点可用性…", () =>
             {
                 var result = new Dictionary<int, string>();
-                var sites = new ISite[] { new FanqieSite(), new BiqugaMobileSite(), new BiqugaSite() };
-                for (int i = 0; i < sites.Length; i++)
+                // 站点列表来自注册表，不再手写数组 —— 加站点不用改这里
+                var all = SiteRegistry.All;
+                for (int i = 0; i < all.Count; i++)
                 {
-                    var p = sites[i] as IProbeable;
+                    var p = all[i].Factory() as IProbeable;
                     string reason = null;
                     if (p != null)
                     {
@@ -2464,13 +2674,14 @@ namespace TomatoBiquga
 
                     foreach (var kv in result)
                     {
-                        if (kv.Value == null) Log("· " + SiteLabels[kv.Key] + "：可用");
-                        else Log("· " + SiteLabels[kv.Key] + "：不可用 —— " + kv.Value);
+                        if (kv.Value == null) Log("· " + SiteLabelAt(kv.Key) + "：可用");
+                        else Log("· " + SiteLabelAt(kv.Key) + "：不可用 —— " + kv.Value);
                     }
-                    // 当前选中的站点不可用 → 明确提示并给出降级建议
-                    int cur = cboSite.SelectedIndex;
-                    if (_siteDown.ContainsKey(cur))
-                        Log("⚠ 当前选中的「" + SiteLabels[cur] + "」不可用。" + DowngradeAdvice(cur));
+                    // 当前生效的站点不可用 → 明确提示并给出降级建议
+                    // （自动模式下"当前生效的"是实测最快的那个，不是下拉框停在哪）
+                    int cur = SiteRegistry.IndexOf(EffectiveSiteKey());
+                    if (cur >= 0 && _siteDown.ContainsKey(cur))
+                        Log("⚠ 当前使用的「" + SiteLabelAt(cur) + "」不可用。" + DowngradeAdvice(cur));
                 });
             });
         }
@@ -2479,30 +2690,168 @@ namespace TomatoBiquga
         private void ApplySiteProbeLabels()
         {
             int sel = cboSite.SelectedIndex;
-            for (int i = 0; i < cboSite.Items.Count && i < SiteLabels.Length; i++)
+            _reloadingSites = true;      // 改 item 文字会触发 SelectedIndexChanged，先挡住
+            try
             {
-                var text = SiteLabels[i];
-                if (_siteDown.ContainsKey(i)) text += "　（当前不可用）";
-                if (cboSite.Items[i] as string != text) cboSite.Items[i] = text;
+                int n = Math.Min(cboSite.Items.Count, SiteRegistry.Count);
+                for (int i = 0; i < n; i++)
+                {
+                    var text = SiteLabelAt(i);
+                    if (_siteDown.ContainsKey(i)) text += "　（当前不可用）";
+                    if (cboSite.Items[i] as string != text) cboSite.Items[i] = text;
+                }
+                if (sel >= 0 && sel < cboSite.Items.Count) cboSite.SelectedIndex = sel;
             }
-            if (sel >= 0 && sel < cboSite.Items.Count) cboSite.SelectedIndex = sel;
+            finally { _reloadingSites = false; }
+
+            // 自动模式下还要把"现在实际用的是哪个站"重新标注一次，
+            // 否则用户看到的是"下拉框停在某个站"，而实际用的是另一个。
+            if (_autoSite) ApplySiteSelection();
         }
 
-        /// <summary>站点不可用时给一句能照做的建议</summary>
+        /// <summary>
+        /// 站点不可用时给一句能照做的建议。
+        ///
+        /// 以前是硬编码 1↔2 的"两个笔趣阁互切"，站点一多就完全失效。
+        /// 现在按**能力**给建议：目录能一页拿全的站就推荐它（快得多），
+        /// 反正是从注册表里挑一个当前探活可用的。
+        /// </summary>
         private string DowngradeAdvice(int index)
         {
-            // 移动版挂了 → 换 PC 版（功能一样，只是目录遍历慢）
-            if (index == 1) return "可以改用「笔趣阁（PC版·慢）」：功能完全一样，只是目录遍历慢一些。";
-            if (index == 2) return "可以改用「笔趣阁（移动版·快）」：目录能并发抓，快很多。";
-            if (index == 0) return "番茄目录接口通常仍然可用；正文受站点风控限制，建议配合第三方番茄核心。";
-            return "";
+            int alt = PickAlternativeSiteIndex(index);
+            if (alt < 0) return "";
+            var d = SiteRegistry.All[alt];
+            string name = d.DisplayName;
+            if (d.Has(SiteCapabilities.TocInDetailPage))
+                return "可以改用「" + name + "」：目录一次请求就能拿全，快很多。";
+            return "可以改用「" + name + "」。";
+        }
+
+        /// <summary>
+        /// 从注册表里挑一个"当前探活可用、且不是当前站"的替代站。
+        ///
+        /// 优先级：能一页拿全目录的（实测最快） &gt; 其余按注册顺序。
+        /// 返回下拉框下标；没有可用替代则 -1。
+        /// </summary>
+        private int PickAlternativeSiteIndex(int excludeIndex)
+        {
+            var all = SiteRegistry.All;
+            int bestFast = -1, bestAny = -1;
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (i == excludeIndex) continue;
+                if (_siteDown.ContainsKey(i)) continue;          // 探活说不通就别推荐
+                if (bestAny < 0) bestAny = i;
+                if (bestFast < 0 && all[i].Has(SiteCapabilities.TocInDetailPage)) bestFast = i;
+            }
+            return bestFast >= 0 ? bestFast : bestAny;
         }
 
         /// <summary>「检测站点」按钮：重新探活一次</summary>
         private void DoProbeSites()
         {
             if (_probing) { Log("站点检测正在进行中…"); return; }
+            if (_rating) { Log("站点实测正在进行中…"); return; }
             ProbeSitesAsync();
+            // 勾了「自动选最快」就顺手重测评分 —— 用户点这个按钮的意图就是
+            // "现在到底哪个站能用、哪个快"，只探活不测速等于只答了一半。
+            if (_autoSite) RateSitesAsync(true);
+        }
+
+        // ============================================================
+        //  「自动选最快站点」
+        // ============================================================
+
+        /// <summary>
+        /// 确保 _siteScores 有值：先读缓存（站点配置.ini），没有就算了。
+        /// **不联网**，所以可以放心在界面线程调用。
+        /// </summary>
+        private void EnsureScores()
+        {
+            if (_siteScores != null) return;
+            _siteScores = SiteRater.Load(SiteProfileStore.DefaultPath);
+            if (_siteScores != null && !SiteRater.IsFresh(_siteScores))
+            {
+                Log("站点评分已过期（超过 " + SiteRater.MaxAgeHours + " 小时），将重新实测。");
+                _siteScores = null;   // 过期就当作没有，交给后台重测
+            }
+        }
+
+        /// <summary>
+        /// 后台实测各站点速度并排名。force=false 时若缓存还新鲜就直接用。
+        ///
+        /// 全部失败**不回退错误**：FastestKey 会返回 null，EffectiveSiteKey 会
+        /// 退到内置笔趣阁 PC 版 —— 也就是"自动"打开之前的老行为。
+        /// </summary>
+        internal void RateSitesAsync(bool force)
+        {
+            if (_rating) return;
+            if (SuppressDialogs) return;      // 自测/自动化下绝不联网
+
+            EnsureScores();
+            if (!force && SiteRater.IsFresh(_siteScores))
+            {
+                LogRanking("（用缓存的评分）");
+                ApplySiteSelection();
+                return;
+            }
+
+            _rating = true;
+            Log("正在实测各站点速度（每站 3 个请求：搜索 / 目录 / 一章正文）…");
+            RunBackground("实测站点速度…", () =>
+            {
+                List<SiteScore> scores = null;
+                try { scores = SiteRater.MeasureAll(Log); }
+                catch (Exception ex) { Log("实测站点速度出错：" + ex.Message); }
+
+                UiInvoke(() =>
+                {
+                    _rating = false;
+                    if (scores != null)
+                    {
+                        _siteScores = scores;
+                        SiteRater.Save(scores, SiteProfileStore.DefaultPath);
+                    }
+                    LogRanking("");
+                    ApplySiteSelection();
+                });
+            });
+        }
+
+        /// <summary>把排名写进日志（用户在日志区就能看到"为什么选了它"）</summary>
+        private void LogRanking(string suffix)
+        {
+            if (_siteScores == null || _siteScores.Count == 0)
+            {
+                Log("站点速度排名：暂无实测数据。");
+                return;
+            }
+            var ranked = SiteRater.Rank(_siteScores);
+            var sb = new System.Text.StringBuilder();
+            sb.Append("站点速度排名（综合分越小越快）").Append(suffix).Append("：");
+            int n = 0;
+            foreach (var s in ranked)
+            {
+                n++;
+                // 不可用的站点**不能**打印成分数 —— 那会让人误以为"它只是慢"。
+                // （实测笔趣阁 PC 版目录要 91 万毫秒，总分会是 ∞ 或超大值。）
+                if (!s.Ok)
+                {
+                    sb.Append("\n  ").Append(n).Append(". ").Append(s.DisplayName)
+                      .Append("：不可用（").Append(s.Error ?? "未知").Append("）");
+                    continue;
+                }
+                sb.Append("\n  ").Append(n).Append(". ").Append(s.DisplayName)
+                  .Append("：").Append(s.TotalMs.ToString("F0")).Append(" ms")
+                  .Append("（搜索 ").Append(s.SearchMs.ToString("F0"))
+                  .Append(" + 目录 ").Append(s.TocMs.ToString("F0"))
+                  .Append(" + 正文 ").Append(s.ChapterMs.ToString("F0")).Append("）");
+                if (s.TocCount > 0) sb.Append("，目录 ").Append(s.TocCount).Append(" 章");
+                if (!string.IsNullOrEmpty(s.SampleTitle)) sb.Append("，《").Append(s.SampleTitle).Append("》");
+            }
+            string fast = SiteRater.FastestKey(_siteScores);
+            sb.Append("\n  → 最快：").Append(fast == null ? "（没有可用站点，回退到笔趣阁 PC版）" : SiteRegistry.LabelOf(fast));
+            Log(sb.ToString());
         }
 
         // ============================================================
@@ -2955,23 +3304,26 @@ namespace TomatoBiquga
         /// </summary>
         private bool EnsureSiteUsable()
         {
-            int cur = cboSite.SelectedIndex;
-            if (!_siteDown.ContainsKey(cur)) return true;
+            int cur = SiteRegistry.IndexOf(EffectiveSiteKey());
+            if (cur < 0 || !_siteDown.ContainsKey(cur)) return true;
 
             var advice = DowngradeAdvice(cur);
-            Log("⚠ 「" + SiteLabels[cur] + "」当前不可用：" + _siteDown[cur]);
+            Log("⚠ 「" + SiteLabelAt(cur) + "」当前不可用：" + _siteDown[cur]);
             if (SuppressDialogs) return true;      // 自测/自动化下不弹窗
+            if (_autoSite) return true;            // 自动模式不该弹"要不要换站"——它自己会挑
 
-            int alt = cur == 1 ? 2 : (cur == 2 ? 1 : -1);
-            var text = "当前选中的「" + SiteLabels[cur] + "」不可用：\n\n" + _siteDown[cur] + "\n\n";
+            // 以前这里是 cur==1?2:(cur==2?1:-1) —— 只会在两个笔趣阁之间对调，
+            // 站点超过 3 个就彻底失效。现在从注册表里挑一个探活可用的替代站。
+            int alt = PickAlternativeSiteIndex(cur);
+            var text = "当前选中的「" + SiteLabelAt(cur) + "」不可用：\n\n" + _siteDown[cur] + "\n\n";
             if (alt >= 0)
             {
-                text += "要改用「" + SiteLabels[alt] + "」继续吗？\n（" + DowngradeAdvice(cur) + "）";
+                text += "要改用「" + SiteLabelAt(alt) + "」继续吗？\n（" + advice + "）";
                 var r = MessageBox.Show(this, text, "站点不可用", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (r == DialogResult.Yes)
                 {
                     cboSite.SelectedIndex = alt;
-                    Log("已切换到「" + SiteLabels[alt] + "」。");
+                    Log("已切换到「" + SiteLabelAt(alt) + "」。");
                 }
                 return r == DialogResult.Yes;
             }
@@ -2998,7 +3350,7 @@ namespace TomatoBiquga
             string root = txtOutput.Text.Trim();
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
             string bookDir, txtPath;
-            DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+            DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
 
             if (!File.Exists(txtPath))
             {
@@ -3070,8 +3422,7 @@ namespace TomatoBiquga
                 ISite other = MakeSite(otherKey);
                 var bm = other as BiqugaMobileSite;
                 if (bm != null) bm.Workers = _settings.BiqugaOnlineWorkers;
-                var bp = other as BiqugaSite;
-                if (bp != null) bp.CrawlWorkers = _settings.BiqugaPcWorkers;
+                // 笔趣阁 PC 版没有并发旋钮（目录遍历结构上串行，见 BiqugaSite.cs）
 
                 int n = 0;
                 int consecutiveEmpty = 0;      // 连续多少章拿不到内容
@@ -3284,9 +3635,8 @@ namespace TomatoBiquga
         /// <summary>当前选中的站点对象</summary>
         private ISite CurrentSite()
         {
-            if (cboSite.SelectedIndex == 0) return new FanqieSite();
-            if (cboSite.SelectedIndex == 1) return new BiqugaMobileSite();
-            return new BiqugaSite();
+            var d = CurrentDescriptor;
+            return d == null ? SiteRegistry.Create(CoreSiteKey) : d.Factory();
         }
 
         /// <summary>
@@ -3385,7 +3735,7 @@ namespace TomatoBiquga
                     string root = txtOutput.Text.Trim();
                     if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
                     string bookDir, txtPath;
-                    DownloadRunner.ResolvePaths(root, book.Title, out bookDir, out txtPath);
+                    DownloadRunner.ResolvePaths(root, book.Title, book.Site, out bookDir, out txtPath);
                     bool append = File.Exists(txtPath);
 
                     if (todo.Count == 0 && append)
@@ -3571,9 +3921,21 @@ namespace TomatoBiquga
         {
             if (string.IsNullOrEmpty(prefix)) return -1;
             var p = prefix.Trim().ToLowerInvariant();
-            if (p == "番茄" || p == "fanqie" || p == "tomato") return 0;
-            if (p == "biquga" || p == "笔趣阁" || p == "biquga-m" || p == "移动版") return 1;
-            if (p == "biquga-pc" || p == "pc" || p == "pc版") return 2;
+
+            // 中文别名（"番茄" / "笔趣阁" 这种用户真会写的）
+            if (p == "番茄" || p == "fanqie" || p == "tomato") return SiteRegistry.IndexOf("fanqie");
+            if (p == "移动版" || p == "biquga-m") return SiteRegistry.IndexOf("biquga-m");
+            if (p == "pc" || p == "pc版" || p == "biquga-pc") return SiteRegistry.IndexOf("biquga");
+            if (p == "笔趣阁") return SiteRegistry.IndexOf("biquga");
+
+            // 其余按注册表里的 Key 或显示名精确匹配 ——
+            // 这样队列里写 "笔尖中文" 或 "xbiquwk" 都能切过去，加站点不用改这里。
+            int byKey = SiteRegistry.IndexOf(prefix.Trim());
+            if (byKey >= 0) return byKey;
+            var all = SiteRegistry.All;
+            for (int i = 0; i < all.Count; i++)
+                if (string.Equals(all[i].DisplayName, prefix.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return i;
             return -1;
         }
     }
@@ -3778,10 +4140,9 @@ namespace TomatoBiquga
 
         private static string SiteLabel(string key)
         {
-            if (string.Equals(key, "fanqie", StringComparison.OrdinalIgnoreCase)) return "番茄小说";
-            if (string.Equals(key, "biquga", StringComparison.OrdinalIgnoreCase)) return "笔趣阁 PC";
-            if (string.Equals(key, "biquga-m", StringComparison.OrdinalIgnoreCase)) return "笔趣阁 移动";
-            return key;
+            // 书架里的 Site 字符串可能来自更老的版本（"biquga-pc" 之类），
+            // 注册表里没有就原样显示，别把它吞掉。
+            return SiteRegistry.LabelOf(key);
         }
 
         private Bookshelf.Entry Selected
@@ -3841,10 +4202,11 @@ namespace TomatoBiquga
                 return;
             }
 
-            // 把主窗口切到这本书所属的站点，这样 _site / _profile 都是对的
-            int idx = 0;
-            if (string.Equals(e.Site, "biquga", StringComparison.OrdinalIgnoreCase)) idx = 2;
-            else if (string.Equals(e.Site, "biquga-m", StringComparison.OrdinalIgnoreCase)) idx = 1;
+            // 把主窗口切到这本书所属的站点，这样 _site / _profile 都是对的。
+            // 老书架记录里的 Key 可能已经不在注册表里了（比如站点被下线）——
+            // 那时退回第 0 项，不当场报错，让用户自己重新选。
+            int idx = SiteRegistry.IndexOf(e.Site);
+            if (idx < 0) idx = 0;
             _owner.SelectSiteForTest(idx);
 
             _update.Enabled = false;

@@ -24,8 +24,8 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 仓库 | https://github.com/George01230123/biquga-downloader （public，默认分支 main） |
-| Release | **v1.0.1** —— https://github.com/George01230123/biquga-downloader/releases/tag/v1.0.1 |
+| 仓库 | https://github.com/George01230123/novel-downloader （public，默认分支 main） |
+| Release | **v1.0.1** —— https://github.com/George01230123/novel-downloader/releases/tag/v1.0.1 |
 | 附件 | `novel-downloader-v1.0.1-win64.zip`（56,219 字节，6 个文件） |
 | CI | run #1~#6 **全部 success**（build + 离线单测 161 项 + release 打包自检） |
 | 协议识别 | GitHub 显示 **MIT** ✅（LICENSE 保持标准原文；说明挪到 `NOTICE.md`） |
@@ -160,7 +160,10 @@ save_path: 'D:/harness work/TomatoBiquga/fanqie-core/下载'
 ### 3. 改仓库名 + 加免责声明
 
 - 名字里有 **Tomato** / **番茄** 是字节跳动的商标，仓库名别用。建议：
-  `biquga-downloader`（准确、好搜）或 `novel-txt-exporter`
+  `novel-downloader`（v1.5.0 起已采用）或 `novel-txt-exporter`
+  > 历史：v1.5.0 之前叫 `biquga-downloader`。那时只有一个笔趣阁源，
+  > 名字带站名还算"准确"；现在一个工具适配多个站（笔尖中文 / 笔趣阁365 / …），
+  > 名字里带某一个站的商标既不准确也不合适，所以改成了中性名。
 - License 建议 **MIT + 免责声明段**，明确写：
   - 本工具**不破解任何 DRM、不绕过登录/付费**，只解析公开可访问的网页
   - 作者**不提供、不托管任何小说正文**，下载内容版权归原作者/站点

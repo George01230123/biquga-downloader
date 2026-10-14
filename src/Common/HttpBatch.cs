@@ -89,7 +89,13 @@ namespace TomatoBiquga
                 //   去掉 --parallel 后是"一个 curl 进程、按顺序发这几个请求"，
                 //   **仍然复用同一条连接**（省掉重复 TLS 握手，这正是提速的来源），
                 //   而 -o 与 URL 严格按顺序配对，不可能张冠李戴。
-                sb.Append("-s --max-time ").Append(Math.Max(5, Http.TimeoutSeconds));
+                sb.Append("-s --compressed --max-time ").Append(Math.Max(5, Http.TimeoutSeconds));
+                // --compressed 让 curl 声明支持 gzip 并**自动解压**。
+                // 为什么必须加：实测笔尖中文的**详情页（约 200 KB）**在客户端声明支持
+                // gzip 时会压缩返回；不带这个参数虽然站点也会给明文（省了 CPU、
+                // 但多传几倍字节），带上则两头都稳。
+                // 关键是**不能只声明不解压** —— 那会把 gzip 字节当成正文，
+                // 抓到的"内容"全是乱码。curl 的 --compressed 自己会解压，所以安全。
                 if (!string.IsNullOrEmpty(referer))
                     sb.Append(" -H \"Referer: ").Append(referer.Replace("\"", "\\\"")).Append('"');
                 if (!string.IsNullOrEmpty(Http.Proxy))

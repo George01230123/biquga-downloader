@@ -90,7 +90,7 @@ internal static class TestMain
         else if (mode == "write")
         {
             // 端到端：搜索 -> 完整目录 -> 下载前 N 章 -> 写 txt（验证与界面里完全相同的代码路径）
-            var site = new BiqugaSite { CrawlWorkers = 8 };
+            var site = new BiqugaSite();
             string kw = args.Length > 1 ? args[1] : "沧元图";
             int n = args.Length > 2 ? int.Parse(args[2]) : 5;
 

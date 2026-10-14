@@ -81,11 +81,87 @@ namespace TomatoBiquga
         private bool _replaceMissing;    // 是否把新章节插到文件里的正确位置（有锚点时为 true）
         private int _inserted;           // 本次实际插入到文件里的章数
 
-        /// <summary>算出一本书的保存目录与 txt 路径</summary>
+        /// <summary>算出一本书的保存目录与 txt 路径（不确定站点时用这个）</summary>
         public static void ResolvePaths(string rootDir, string bookTitle, out string bookDir, out string txtPath)
         {
-            bookDir = Path.Combine(rootDir, Http.SafeFileName(bookTitle));
-            txtPath = Path.Combine(bookDir, Http.SafeFileName(bookTitle) + ".txt");
+            ResolvePaths(rootDir, bookTitle, null, out bookDir, out txtPath);
+        }
+
+        /// <summary>
+        /// 算出一本书的保存目录与 txt 路径，并处理**跨站点同名书**的撞车。
+        ///
+        /// 为什么需要 siteKey：两本书可能来自不同站点却**书名完全相同**
+        /// （聚合站之间本来就互相转载）。不带站点维度的话它们会写进
+        /// 同一个目录、同一个 .txt，互相覆盖 —— 用户看到的是"下完了一本，
+        /// 另一本变成两半"。
+        ///
+        /// 但也不能无条件加后缀：老用户已经下好一堆 `书名\书名.txt`，
+        /// 一改命名就等于"全部没下过"，会重新下一遍。
+        /// 所以**只在真的撞车时**才加站点后缀：
+        ///   · 目录还不存在                → 用干净的名字（保持老行为）
+        ///   · 目录存在、且书架说它属于本站 → 用干净的名字（继续增量更新）
+        ///   · 目录存在、但属于别的站点     → 加后缀 `书名 [站点名]`
+        ///   · 目录存在、却查不到是谁的     → 也加后缀（宁可多一个目录，不要覆盖别人的书）
+        /// </summary>
+        public static void ResolvePaths(string rootDir, string bookTitle, string siteKey,
+            out string bookDir, out string txtPath)
+        {
+            string safe = Http.SafeFileName(bookTitle);
+            bookDir = Path.Combine(rootDir, safe);
+            txtPath = Path.Combine(bookDir, safe + ".txt");
+
+            if (string.IsNullOrEmpty(siteKey)) return;
+            try
+            {
+                if (!Directory.Exists(bookDir)) return;          // 没撞车，保持干净名字
+
+                // Bookshelf 的主键是 站点+Key(Dir/BookId)，不是书名；所以这里按
+                // 记录里记下的 FilePath 反查这个目录到底是谁的。
+                //
+                // ★ 判据必须**只有**这一条：书架明确说这个目录属于**别的**站点。
+                //   早先我还加了一条"目录里有 .txt 但查不到归属 → 也当撞车"，
+                //   结果把"没有任何书架记录、但目录里已经下过书"的普通情况
+                //   也判成撞车 —— 表现是**再次下载会写到一个新目录里去**
+                //   （增量/续传/补齐全废，实测一次打挂 22 条测试）。
+                //   而那种情况本来就不该改名：没有证据说明它是别人的书，
+                //   改名只会让用户已有的产物变成孤儿。
+                var shelf = Bookshelf.Load();
+                string owner = OwnerSiteOfDir(shelf, bookDir);
+                if (owner == null) return;                       // 归属不明 → 保持老行为
+                if (string.Equals(owner, siteKey, StringComparison.OrdinalIgnoreCase))
+                    return;                                      // 本来就是本站的目录 → 继续增量更新
+
+                string alt = Http.SafeFileName(bookTitle + " [" + SiteRegistry.LabelOf(siteKey) + "]");
+                bookDir = Path.Combine(rootDir, alt);
+                txtPath = Path.Combine(bookDir, alt + ".txt");
+            }
+            catch { /* 书架读不出来就用干净名字，保持老行为 */ }
+        }
+
+        /// <summary>
+        /// 这个目录的书架归属是哪个站点；查不到返回 null。
+        /// 判据是记录里的 FilePath 的**父目录**和这个目录相同。
+        /// </summary>
+        private static string OwnerSiteOfDir(Bookshelf shelf, string dir)
+        {
+            if (shelf == null || shelf.Entries == null || string.IsNullOrEmpty(dir)) return null;
+            string want;
+            try { want = Path.GetFullPath(dir).TrimEnd('\\', '/'); }
+            catch { return null; }
+
+            foreach (var e in shelf.Entries)
+            {
+                if (e == null || string.IsNullOrEmpty(e.FilePath)) continue;
+                try
+                {
+                    var parent = Path.GetDirectoryName(Path.GetFullPath(e.FilePath));
+                    if (parent == null) continue;
+                    if (string.Equals(parent.TrimEnd('\\', '/'), want, StringComparison.OrdinalIgnoreCase))
+                        return e.Site;
+                }
+                catch { }
+            }
+            return null;
         }
 
         public void Run()
@@ -97,7 +173,7 @@ namespace TomatoBiquga
                 ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载")
                 : RootDir;
 
-            ResolvePaths(root, Book.Title, out BookDir, out OutputFile);
+            ResolvePaths(root, Book.Title, Book.Site, out BookDir, out OutputFile);
             Log("保存根目录：" + root);
             Log("本书目录：" + BookDir);
             Directory.CreateDirectory(BookDir);
@@ -1097,7 +1173,9 @@ namespace TomatoBiquga
             var sb = new StringBuilder();
             sb.AppendLine(Book.Title);
             sb.AppendLine("作者：" + (string.IsNullOrEmpty(Book.Author) ? "未知" : Book.Author));
-            sb.AppendLine("来源：" + (Book.Site == "fanqie" ? "番茄小说" : "笔趣阁") + "　" + Book.Url);
+            // 来源写**真实站点名**。以前是 `fanqie ? "番茄小说" : "笔趣阁"` 的二选一 ——
+            // 站点一多，笔尖中文/笔趣阁365 都会被印成"笔趣阁"，产物里的出处就是错的。
+            sb.AppendLine("来源：" + SiteRegistry.LabelOf(Book.Site) + "　" + Book.Url);
             if (!string.IsNullOrEmpty(Book.Desc))
             {
                 var desc = Book.Desc.Replace("\n", " ");
