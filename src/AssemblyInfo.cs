@@ -23,6 +23,17 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.5.1：按站点实测调默认并发（只改默认值，不动用户已写好的配置）。
+//        · 笔尖中文 / 笔趣阁365 默认并发 6 → **12**
+//          实测（每档 25 章，限流计数全程为 0）：
+//            笔尖中文  4→155ms  8→79ms  **12→60ms**  16→48ms  24→43ms
+//            笔趣阁PC  4→979ms  8→1038ms 12→747ms   16→457ms
+//          → 1308 章的书，正文下载从 ≈2.1 分降到 ≈1.2 分。
+//        · 笔趣阁 PC 保持 6：它的成本大头是**目录遍历**（772 页串行），
+//          加正文并发省不了多少；而且换源收益远大于调并发。
+//        · 不认识的站点给保守值 6（没有"高并发不会被限流"的实测依据就不冒进）。
+//        · 顺带修掉一个会自己过期的测试：评分时间戳用例写死了日期，
+//          隔一天再跑就假失败（代码其实是对的，Ticks 完全一致）。
 // 1.5.0：多站点 + 自动选最快站点。
 //        · 站点注册表（SiteRegistry）：站点列表不再硬编码在界面里，
 //          加站点 = 在 SiteRules.cs 填一张表。
@@ -43,6 +54,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.0.0")]
-[assembly: AssemblyFileVersion("1.5.0.0")]
-[assembly: AssemblyInformationalVersion("1.5.0")]
+[assembly: AssemblyVersion("1.5.1.0")]
+[assembly: AssemblyFileVersion("1.5.1.0")]
+[assembly: AssemblyInformationalVersion("1.5.1")]

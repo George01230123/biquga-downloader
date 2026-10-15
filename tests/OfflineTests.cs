@@ -2059,6 +2059,28 @@ namespace TomatoBiquga
             // 站点数不再是写死的 3 —— 加书源之后它必须跟着站点注册表走
             Eq("站点配置：默认站点数与注册表一致", SiteRegistry.Count, defs.Count);
             Check("站点配置：三个内置站点都在", defs.Count >= 3);
+
+            // ---- 各站默认并发（实测调出来的，见 SiteProfile.DefaultWorkersFor 注释）----
+            // 为什么要钉住：这个值直接决定下载快慢，改错了要么变慢要么招站点限流。
+            // 实测依据（每档 25 章、限流计数全程为 0）：
+            //   笔尖中文 4→155ms 8→79ms 12→60ms 16→48ms
+            //   笔趣阁PC 4→979ms 8→1038ms 12→747ms 16→457ms
+            Eq("站点配置：笔尖中文默认并发 12（实测 60ms/章）", 12, SiteProfileStore.DefaultWorkersFor("xbiquwk"));
+            Eq("站点配置：笔趣阁365默认并发 12", 12, SiteProfileStore.DefaultWorkersFor("biquge365"));
+            Eq("站点配置：笔趣阁PC 保持 6（成本大头是目录遍历，加并发没用）", 6, SiteProfileStore.DefaultWorkersFor("biquga"));
+            Eq("站点配置：移动版默认并发 8", 8, SiteProfileStore.DefaultWorkersFor("biquga-m"));
+            Eq("站点配置：番茄默认并发 4（风控敏感）", 4, SiteProfileStore.DefaultWorkersFor("fanqie"));
+            Eq("站点配置：未知站点给保守值 6", 6, SiteProfileStore.DefaultWorkersFor("不存在的站"));
+            Eq("站点配置：空 key 给保守值 6", 6, SiteProfileStore.DefaultWorkersFor(null));
+
+            // 默认值必须真的落到生成的 profile 上（不只是那个函数对）
+            foreach (var d in SiteRegistry.All)
+            {
+                int want = SiteProfileStore.DefaultWorkersFor(d.Key);
+                SiteProfile got = null;
+                foreach (var x in defs) if (x.Name == d.Key) got = x;
+                Check("站点配置：" + d.Key + " 的默认并发落到 profile", got != null && got.Workers == want);
+            }
             var m = SiteProfileStore.Get("biquga-m");
             Eq("站点配置：移动版默认并发", 8, m.Workers);
             Check("站点配置：默认编码是 utf-8", m.IsUtf8(m.OutputEncoding));
@@ -2483,8 +2505,13 @@ namespace TomatoBiquga
             //   原来写出时用 {4:F0}（四舍五入的毫秒）、读回却当 Ticks 用，
             //   于是读回的时间比原值早最多 1 秒 → IsFresh 判过期 →
             //   表现是"每次启动都重测一遍"。Ticks 是 100ns 单位，不能丢精度。
+            //
+            //   ⚠️ 基准时间**必须相对当前时间**，不能写死日期：
+            //   原来写的是 new DateTime(2026,10,14,...)，跑的时候是当天所以过；
+            //   隔了一天再跑，"读回后仍算新鲜"就莫名其妙失败了 ——
+            //   而代码其实是对的（诊断显示 Ticks 完全一致）。测试自己会过期。
             var exact = new List<SiteScore> { SiteScore.Measured("xbiquwk", "笔尖中文", 1, 1, 1) };
-            exact[0].MeasuredAt = new DateTime(2026, 10, 14, 12, 34, 56, 789).AddTicks(1234);
+            exact[0].MeasuredAt = DateTime.Now.AddMinutes(-5).AddTicks(1234);
             var iniExact = Path.Combine(work, "rating", "时间戳.ini");
             SiteRater.Save(exact, iniExact);
             var exactBack = SiteRater.Load(iniExact);

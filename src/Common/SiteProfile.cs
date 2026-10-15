@@ -142,8 +142,6 @@ namespace TomatoBiquga
             var list = new List<SiteProfile>();
             foreach (var d in SiteRegistry.All)
             {
-                // 实测调出来的基线：移动版 8 线程 / 间隔 60~180 是"实测 1000 章约 10 分钟"那组参数；
-                // 其余默认 6 线程 / 120~400。
                 bool mobile = string.Equals(d.Key, "biquga-m", StringComparison.OrdinalIgnoreCase);
                 bool fanqie = string.Equals(d.Key, "fanqie", StringComparison.OrdinalIgnoreCase);
 
@@ -151,7 +149,7 @@ namespace TomatoBiquga
                 {
                     Name = d.Key,
                     DisplayName = d.DisplayName,
-                    Workers = mobile ? 8 : (fanqie ? 4 : 6),
+                    Workers = DefaultWorkersFor(d.Key),
                     MinDelayMs = mobile ? 60 : (fanqie ? 120 : 120),
                     MaxDelayMs = mobile ? 180 : (fanqie ? 400 : 400),
                     TimeoutSeconds = 25,
@@ -164,6 +162,40 @@ namespace TomatoBiquga
                 list.Add(p);
             }
             return list;
+        }
+
+        /// <summary>
+        /// 各站点的默认并发。
+        ///
+        /// 为什么不是一个统一数字：并发的正确值取决于**站点每章延迟**，
+        /// 而不是"越大越快"。实测（2026-10-14，每档 25 章、限流计数全程为 0）：
+        ///
+        ///   笔尖中文：4→155ms  8→79ms  12→60ms  16→48ms  24→43ms   ← 延迟低，加线程几乎线性见效
+        ///   笔趣阁PC：4→979ms  8→1038ms 12→747ms 16→457ms          ← 延迟高，要到 16 才压得住
+        ///
+        /// 所以：
+        ///   · 轻站点（笔尖中文 / 笔趣阁365）给 12 —— 相对 6 约省一半时间，仍留有余量
+        ///   · 笔趣阁 PC 给 6 保持不变：它的成本大头是**目录遍历**（772 页串行，改并发没用），
+        ///     正文加到 16 虽能快一倍，但它本来就不是推荐源（换源收益远大于调并发）
+        ///   · 移动版 8、番茄 4 沿用实测值
+        ///
+        /// 为什么不做成"统一调到 16"：站点承受能力和延迟特性差别很大，
+        /// 一刀切会把余量压没；而且用户真想要更快应该**换源**而不是猛加并发。
+        /// </summary>
+        public static int DefaultWorkersFor(string siteKey)
+        {
+            if (string.IsNullOrEmpty(siteKey)) return 6;
+            if (string.Equals(siteKey, "fanqie", StringComparison.OrdinalIgnoreCase)) return 4;
+            if (string.Equals(siteKey, "biquga-m", StringComparison.OrdinalIgnoreCase)) return 8;
+            if (string.Equals(siteKey, "biquga", StringComparison.OrdinalIgnoreCase)) return 6;
+
+            // 规则表站点（笔尖中文 / 笔趣阁365 …）：实测轻、12 并发无限流。
+            //
+            // ★ 但**只对注册表里真实存在的站点**给 12。
+            //   不认识的 key 给保守值 —— 那些可能是用户手写的、或将来新加还没实测的源，
+            //   在没有"12 并发不会被限流"的实测依据之前，用 6 更安全。
+            if (SiteRegistry.ByKey(siteKey) != null) return 12;
+            return 6;
         }
 
         /// <summary>按站点 key 取参数（文件里没有这一节就用默认值）</summary>
