@@ -23,6 +23,22 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.5.2：修掉控制台中文乱码（用户直接反馈："运行出来全是乱码"）。
+//        · 根因：程序写的是**正确的 UTF-8 字节**，但 Windows 控制台默认按
+//          GBK(936) 解码 → 乱码。而"真实控制台"与"重定向到文件"是**两条
+//          不同的编码路径**，原来只处理了后者（只设 Console.OutputEncoding）：
+//            重定向     → .NET 按 OutputEncoding 编码字节    ✔ 一直是对的
+//            真实控制台 → Windows 按**控制台代码页**翻译    ✘ 936 下全是乱码
+//        · 修法：新增 ConsoleSetup.UseUtf8()，把**控制台代码页**（Win32
+//          SetConsoleOutputCP）与 Console.OutputEncoding **一起**切到 UTF-8，
+//          并统一到全部 9 个入口（GUI + 8 个测试/探针 exe）。
+//        · 顺带修掉 GUI 的 `--selftest` **一个字都不输出**：
+//          winexe 进程没有控制台，Windows 还会把它的 stdout 句柄置空
+//          （实测 GetStdHandle 返回 0、AttachConsole 返回 ACCESS_DENIED）。
+//          现在改成：能挂父控制台就挂；挂不上就把结果**同时**写一份
+//          "自测结果.txt"（exe 同目录，不可写则退 %TEMP%）。
+//        · 弹窗提示只在"真的没有控制台窗口"时才弹 —— 否则模态框会把
+//          自动化流程挂死（实测挂过 573 秒才被强杀）。
 // 1.5.1：按站点实测调默认并发（只改默认值，不动用户已写好的配置）。
 //        · 笔尖中文 / 笔趣阁365 默认并发 6 → **12**
 //          实测（每档 25 章，限流计数全程为 0）：
@@ -54,6 +70,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.1.0")]
-[assembly: AssemblyFileVersion("1.5.1.0")]
-[assembly: AssemblyInformationalVersion("1.5.1")]
+[assembly: AssemblyVersion("1.5.2.0")]
+[assembly: AssemblyFileVersion("1.5.2.0")]
+[assembly: AssemblyInformationalVersion("1.5.2")]

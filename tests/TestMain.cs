@@ -10,11 +10,9 @@ internal static class TestMain
 {
     private static void Main(string[] args)
     {
-        try
-        {
-            Console.OutputEncoding = Encoding.UTF8;
-        }
-        catch { }
+        // 走 ConsoleSetup：控制台代码页与 OutputEncoding 一起切。
+        // 原来只设 OutputEncoding，在真实 cmd 窗口里中文是乱码。
+        ConsoleSetup.UseUtf8();
         try
         {
             Run(args);

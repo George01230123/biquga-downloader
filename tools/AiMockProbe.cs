@@ -33,7 +33,8 @@ internal static class AiMockProbe
 
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = new UTF8Encoding(false);
+        // 走 ConsoleSetup：控制台代码页与 OutputEncoding 一起切。
+        TomatoBiquga.ConsoleSetup.UseUtf8();
         string mode = args.Length > 0 ? args[0] : "openai";
 
         // 假服务的响应：模拟模型按我们要求的格式回答

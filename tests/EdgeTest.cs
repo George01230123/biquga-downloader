@@ -18,7 +18,8 @@ internal static class EdgeTest
 
     private static void Main(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        // 走 ConsoleSetup：控制台代码页与 OutputEncoding 一起切，两条输出路径都对。
+        TomatoBiquga.ConsoleSetup.UseUtf8();
         Console.WriteLine("=== 边界与回归测试 ===");
 
         // 1) 正式写出：表头应包含统计行、BOM、正文完整

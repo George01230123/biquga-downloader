@@ -39,7 +39,21 @@ namespace TomatoBiquga
                 //   Console.set_OutputEncoding 会抛 IOException（"句柄无效"，退出码 0xE0434352）。
                 //   必须先 attach 到父进程（调用它的那个 cmd/PowerShell）的控制台。
                 try { AttachConsole(-1); } catch { }
-                try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { }
+                // ★ 编码由 ConsoleSetup 统一处理：它既切控制台代码页（真实控制台那条路径），
+                //   也设 Console.OutputEncoding（重定向那条路径）。原来只做后者，
+                //   结果用户在 cmd 里看到的中文全是乱码。
+                ConsoleSetup.UseUtf8();
+
+                // ★ GUI(winexe) 进程默认没有控制台，Windows 还会把它的 stdout 句柄置空 ——
+                //   于是"在 cmd 里跑 --selftest"什么也看不到（退出码 0、输出 0 字节）。
+                //   能挂到父控制台就挂；挂不上就把结果**同时**写一份日志文件，
+                //   免得用户以为程序没跑。
+                string logPath = null;
+                if (!ConsoleSetup.StdoutIsRedirected() && !ConsoleSetup.AttachForOutput())
+                {
+                    logPath = ConsoleSetup.ResolveResultFile("自测结果.txt");
+                    if (ConsoleSetup.TeeToFile(logPath) == null) logPath = null;
+                }
 
                 // ★ 跳过「布局体检」那一条 —— 详见 OfflineTests.Run 里 --skip-layout 的注释：
                 //   它会真的 new 一个 MainForm 去量控件，量出来的尺寸依赖进程的 DPI 环境，
@@ -56,6 +70,37 @@ namespace TomatoBiquga
                     try { Console.Error.WriteLine("自测异常：" + ex); } catch { }
                     code = 1;
                 }
+
+                // 既没有控制台、也没有重定向时，用弹窗把结论告诉用户 ——
+                // 否则他（双击 exe 的情形）跑完只看到"什么都没发生"。
+                //
+                // ★ 弹窗的判据要够硬：**只有"输出真的无处可去"时才弹**。
+                //   踩过两次坑：
+                //     ① 只判 Environment.UserInteractive → 这台机器上恒为 true，
+                //        于是从 cmd 里跑也会弹窗；
+                //     ② 弹窗是**模态**的，无人值守时没人在屏幕前点"确定"，
+                //        会永久阻塞、把自动化流程挂死（实测挂了 573 秒才被强杀）。
+                //   所以要求：没有控制台窗口（双击才有这情形）+ 没有重定向 + 有交互桌面。
+                //   从 cmd 里跑时用户已在窗口里看得到结果，不需要弹窗。
+                bool nowhereToShow = logPath != null
+                    && !ConsoleSetup.HasConsoleWindow()
+                    && !ConsoleSetup.StdoutIsRedirected()
+                    && Environment.UserInteractive
+                    && SystemInformation.UserInteractive;
+                if (nowhereToShow)
+                {
+                    try
+                    {
+                        MessageBox.Show(
+                            (code == 0 ? "自测通过。" : "自测失败（退出码 " + code + "）。") +
+                            "\n\n完整结果已写入：\n" + logPath,
+                            "小说下载器 · 自测",
+                            MessageBoxButtons.OK,
+                            code == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    }
+                    catch { }
+                }
+
                 Environment.ExitCode = code;
                 return;
             }

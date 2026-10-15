@@ -19,7 +19,8 @@ internal static class RatTest
 {
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = new UTF8Encoding(false);
+        // 控制台代码页 + OutputEncoding 一起切（只设后者在 cmd 里是乱码）。
+        ConsoleSetup.UseUtf8();
         string key = args.Length > 0 ? args[0] : "xbiquwk";
         int lo = args.Length > 1 ? int.Parse(args[1]) : 4;
         int hi = args.Length > 2 ? int.Parse(args[2]) : 24;

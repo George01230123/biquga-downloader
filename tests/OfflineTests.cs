@@ -180,7 +180,11 @@ namespace TomatoBiquga
             //
             //   Program.cs 里同样的调用是包了 try 的（AttachConsole 之后），这里漏了。
             //   把编码设置当作"尽力而为"：设不上就按默认编码输出，测试本身照跑。
-            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            //
+            //   ★ 现在改走 ConsoleSetup.UseUtf8()：它除了设 OutputEncoding（重定向那条
+            //     路径），还切**控制台输出代码页**（真实控制台那条路径）。
+            //     原来只做前者，于是用户在 cmd 里跑 --selftest 看到的中文全是乱码。
+            TomatoBiquga.ConsoleSetup.UseUtf8();
 
             _pass = 0;
             _fail = 0;

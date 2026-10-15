@@ -44,7 +44,9 @@ internal static class LiveProbe
 
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = new UTF8Encoding(false);
+        // 走 ConsoleSetup：控制台代码页与 OutputEncoding 一起切。
+        // 这个探针是用户最常在 cmd 里直接跑的，原来只设 OutputEncoding → 中文乱码。
+        ConsoleSetup.UseUtf8();
         string mode = args.Length > 0 ? args[0] : "cover";
         Console.WriteLine("=== 联网实测探针：" + mode + " ===");
         Console.WriteLine();

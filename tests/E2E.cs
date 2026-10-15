@@ -68,7 +68,9 @@ internal static class E2E
 
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = new UTF8Encoding(false);
+        // 走 ConsoleSetup：它同时切**控制台代码页**和 OutputEncoding。
+        // 只设后者的话，真实 cmd 窗口（那个窗口的代码页是 936）里中文会成乱码。
+        TomatoBiquga.ConsoleSetup.UseUtf8();
         var work = args != null && args.Length > 0 && args[0].Length > 0
             ? args[0]
             : Path.Combine(Path.GetTempPath(), "novel-e2e-" + Guid.NewGuid().ToString("N").Substring(0, 8));
