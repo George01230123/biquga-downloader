@@ -23,6 +23,23 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.5.6：修掉「两次打开显示不一样」—— 分隔条默认位置不稳定。
+//        · 现象（用户拿两张截图对比）：同一个 exe 连续启动，结果区高度不一样 ——
+//          有时占满、章节区被挤到只剩 206px，有时又正常。用户原话"你的显示一直有问题"。
+//        · 根因：`split.SplitterMoved` 在**程序自己**改 SplitterDistance
+//          （ClampSplitter、窗体尺寸变化）时也会触发，于是布局期间就把那个中间值
+//          写进了 `_preferredSplit`，此后不再按比例重算。
+//          实测固定落在 Panel1=469（占 68%），而按规则应是 306（45%）。
+//        · 顺带说明一个更早的坑：`_preferredSplit` 曾是 **static** ——
+//          同一次运行里打开第二个窗口会继承上一个窗口的布局（现在已不是，别改回去）。
+//        · 修法：加 `_layoutDone` 标志（Shown 之后才置位），布局期间的
+//          SplitterMoved 一律不算"用户的选择"；默认位置改固定规则：45%，且保证
+//            结果区 ≥ 170px（能看 5~6 行搜索结果）
+//            章节区 ≥ 240px（能看 8~9 行章节）
+//          两者放不下时优先保结果区（"搜完看不见结果"比"章节列表短"更让人困惑）。
+//        · 加 8 条回归断言（含"连开 3 次位置必须一致"）。
+//          反向验证：去掉 _layoutDone 防线会红 2 条，报出的正是
+//          "章节区 206px"、"结果区占 68%" —— 就是用户看到的那个坏布局。
 // 1.5.5：**诊断版** —— 不修 bug，是给"搜到了但列表不显示"装仪表。
 //        背景：用户报"搜到 50 条，列表空白"，我在本地用真实索引、
 //        真实 UI 流程反复复现都正常（探针实测 FillBooks 能填进 3 项）。
@@ -112,6 +129,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.5.0")]
-[assembly: AssemblyFileVersion("1.5.5.0")]
-[assembly: AssemblyInformationalVersion("1.5.5")]
+[assembly: AssemblyVersion("1.5.6.0")]
+[assembly: AssemblyFileVersion("1.5.6.0")]
+[assembly: AssemblyInformationalVersion("1.5.6")]

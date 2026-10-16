@@ -57,18 +57,52 @@ namespace TomatoBiquga
         private Button btnDetectTypos;      // 错字检测（双源比对）
         private CheckBox chkTraditional;    // 输出繁体（繁简转换）
 
-        /// <summary>把分隔条位置夹到合法范围内（窗口还很小的时候尤其重要）</summary>
+        /// <summary>
+        /// 把分隔条位置夹到合法范围内，并保证**首次显示时有一个稳定、两边都能用的默认位置**。
+        ///
+        /// ★ 为什么重写了：原来只在 SizeChanged / HandleCreated 里算，而那两个时刻
+        ///   窗体的最终尺寸还没定，`_preferredSplit` 也还没被用户设过 ——
+        ///   于是默认位置变成了"看运气"：实测同一个 exe 连续启动两次，
+        ///   一次结果区占满、一次章节区占满（用户截图里就是这个现象：
+        ///   两张图中间区域的高度完全不同，还抱怨"显示有问题"）。
+        ///
+        ///   现在的规则：
+        ///     · 用户拖过分隔条（_preferredSplit > 0）→ 尊重用户的值
+        ///     · 没拖过 → 用**固定比例 45%**，并保证
+        ///         结果区 ≥ 170px（能看见 5~6 行搜索结果）
+        ///         章节区 ≥ 240px（能看见 8~9 行章节）
+        ///       两个都放不下时（窗口特别矮）优先保结果区，因为"搜完看不见结果"
+        ///       比"章节列表短"更让人困惑。
+        /// </summary>
         private void ClampSplitter()
         {
             if (_split == null) return;
             try
             {
                 int h = _split.Height;
-                int want = _preferredSplit;
-                if (want <= 0) want = Math.Max(120, (int)(h * 0.28));
-                int min = _split.Panel1MinSize;
-                int max = h - _split.Panel2MinSize - _split.SplitterWidth;
-                if (max < min) return;                 // 空间实在不够，先不动
+                if (h <= 0) return;
+
+                const int WantResults = 170;    // 结果区理想最小高度
+                const int WantChapters = 240;   // 章节区理想最小高度
+
+                int min = _split.Panel1MinSize;                                  // 80
+                int max = h - _split.Panel2MinSize - _split.SplitterWidth;       // h-106
+                if (max < min) return;             // 空间实在不够，先不动
+
+                int want;
+                if (_userMovedSplit && _preferredSplit > 0)
+                {
+                    want = _preferredSplit;        // 用户真拖过才听用户的
+                }
+                else
+                {
+                    // 没拖过：固定 45%，再用"两边都够用"的目标高度夹一次
+                    want = (int)(h * 0.45);
+                    if (want < WantResults) want = WantResults;
+                    if (h - want - _split.SplitterWidth < WantChapters)
+                        want = h - _split.SplitterWidth - WantChapters;
+                }
+
                 if (want < min) want = min;
                 if (want > max) want = max;
                 if (_split.SplitterDistance != want) _split.SplitterDistance = want;
@@ -80,6 +114,15 @@ namespace TomatoBiquga
         }
 
         private int _preferredSplit;
+
+        /// <summary>用户是否**真的**拖过分隔条。false 时每次布局都按比例重算。</summary>
+        private bool _userMovedSplit;
+
+        /// <summary>
+        /// 窗体是否已经完成首次显示（Shown 之后置 true）。
+        /// 用来区分"布局期间程序自己触发的事件"和"用户之后的操作"。
+        /// </summary>
+        private bool _layoutDone;
         private BookInfo _currentBook;
         private volatile bool _cancel;
         private volatile bool _busy;
@@ -381,12 +424,31 @@ namespace TomatoBiquga
                 Panel2MinSize = 100,
             };
             _split = split;
-            // SplitContainer 在窗体还没完成布局时宽度可能只有默认值，
+            // SplitContainer 在窗体还没完成布局时尺寸可能还是默认值，
             // 此时直接给 SplitterDistance 会抛 “必须在 Panel1MinSize 和 Width - Panel2MinSize 之间”，
-            // 所以这里每次都按当前宽度夹一次，并在窗口尺寸变化时重新夹。
+            // 所以这里每次都按当前尺寸夹一次，并在窗口尺寸变化时重新夹。
             split.SizeChanged += (s, e) => ClampSplitter();
             split.HandleCreated += (s, e) => ClampSplitter();
-            split.SplitterMoved += (s, e) => { _preferredSplit = split.SplitterDistance; };
+            // ★ 只有**窗体已经显示完、且用户真的拖了**才记住位置。
+            //
+            //   原来这里无条件写 `_preferredSplit = SplitterDistance`，有两个坑：
+            //     ① 程序自己改 SplitterDistance（ClampSplitter、窗体尺寸变化）
+            //        也会触发 SplitterMoved → 把自己的中间值当成"用户的选择"，
+            //        此后不再按比例重算。实测固定落在 Panel1=469（应是 306），
+            //        而且同一个 exe 每次启动都是这个错值。
+            //     ② 更早的版本把 _preferredSplit 做成 **static**，于是同一次运行里
+            //        打开第二个窗口会继承上一个窗口的布局 ——
+            //        "第一次打开和第二次打开不一样"就是这么来的。
+            //
+            //   判据用 _layoutDone（Shown 之后才置位）：布局期间的
+            //   SplitterMoved 全部是程序自己触发的，一律不记。
+            //   用户之后拖分隔条时 _layoutDone 已为 true，照常记住。
+            split.SplitterMoved += (s, e) =>
+            {
+                if (!_layoutDone) return;           // 布局期间的自动触发，不算用户选择
+                _userMovedSplit = true;
+                _preferredSplit = split.SplitterDistance;
+            };
 
             lstBooks = new ListView
             {
@@ -509,6 +571,7 @@ namespace TomatoBiquga
             Shown += (s, e) =>
             {
                 ClampSplitter();
+                _layoutDone = true;     // 之后再来的 SplitterMoved 才算"用户拖的"
                 LayoutInlineTweaks();
             };
             Resize += (s, e) => LayoutInlineTweaks();
@@ -581,6 +644,12 @@ namespace TomatoBiquga
         internal string EffectiveSiteKeyForTest()
         {
             return EffectiveSiteKey();
+        }
+
+        /// <summary>仅供自动化测试：拿到结果区/章节区之间的分隔条容器（量布局用）</summary>
+        internal SplitContainer SplitterForTest()
+        {
+            return _split;
         }
 
         /// <summary>

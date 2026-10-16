@@ -2614,6 +2614,62 @@ namespace TomatoBiquga
 
             // ---------- 关键词检查开关：它曾整批误杀真结果 ----------
             TestKeywordGuardSwitch();
+
+            // ---------- 分隔条默认位置必须稳定 ----------
+            TestSplitterDefault();
+        }
+
+        /// <summary>
+        /// 结果区 / 章节区的分隔条默认位置必须**每次都一样**、且两边都够用。
+        ///
+        /// ★ 真实故障（用户拿两张截图对比）：同一个 exe 连续启动，
+        ///   结果区高度不一样 —— 有时占满（章节被挤到最小），有时正常。
+        ///   根因：`split.SplitterMoved` 在**程序自己**改 SplitterDistance
+        ///   （ClampSplitter / 窗体尺寸变化）时也会触发，于是布局期间就把
+        ///   中间值写进了 `_preferredSplit`，此后不再按比例重算。
+        ///   实测固定落在 Panel1=469，而按规则应是 306。
+        ///   更早还有个坑：`_preferredSplit` 曾是 **static**，
+        ///   同一次运行里打开第二个窗口会继承上一个窗口的布局。
+        /// </summary>
+        private static void TestSplitterDefault()
+        {
+            int? first = null;
+            for (int round = 0; round < 3; round++)
+            {
+                using (var f = new MainForm())
+                {
+                    f.StartPosition = FormStartPosition.Manual;
+                    f.Location = new Point(-4000, -4000);
+                    f.ShowInTaskbar = false;
+                    f.SuppressDialogs = true;
+                    f.Size = new Size(1000, 720);
+                    f.Show();
+                    Application.DoEvents();
+
+                    var sp = f.SplitterForTest();
+                    Check("分隔条：能拿到 SplitContainer", sp != null);
+                    if (sp == null) return;
+
+                    int d = sp.SplitterDistance;
+                    if (first == null)
+                    {
+                        first = d;
+                        Check("分隔条：结果区高度不小于 170px（实际 " + sp.Panel1.Height + "）",
+                            sp.Panel1.Height >= 170);
+                        Check("分隔条：章节区高度不小于 240px（实际 " + sp.Panel2.Height + "）",
+                            sp.Panel2.Height >= 240);
+                        // 旧 bug 就是 469/681 = 69%，把章节区挤到最小
+                        Check("分隔条：结果区不超过总高的 60%（实际 "
+                            + (sp.Panel1.Height * 100 / sp.Height) + "%）",
+                            sp.Panel1.Height * 100 / sp.Height <= 60);
+                    }
+                    else
+                    {
+                        Eq("分隔条：第 " + (round + 1) + " 次打开的位置与第一次一致",
+                            first.Value, d);
+                    }
+                }
+            }
         }
 
         /// <summary>
