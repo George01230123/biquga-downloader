@@ -23,6 +23,20 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.5.4：修掉「有的词搜不出来」—— 关键词检查整批误杀真结果。
+//        · 现象（用户报"搜万妖圣祖搜不到"）：同一个站，搜《万相之王》能搜到、
+//          搜《万妖圣祖》就"无结果"，用户完全无法理解。
+//        · 实测真相：笔尖中文搜「万妖圣祖」时结果页里**有 50 条书籍链接**，
+//          但页面**不回显关键词**（站点是模糊匹配，结果标题里也不含那四个字）
+//          → 被 SearchResultMustContainKeyword 判成"无结果"，50 条全丢。
+//        · 根因：那个检查拿"整页 HTML 里有没有这几个字"当作
+//          "站点有没有按关键词检索"，而前者只等于"站点有没有回显搜索框内容"。
+//          它本来是为挡梦书中文（搜什么都返回《长乐歌》）加的，但对正常站点
+//          会误杀。→ 关掉（梦书中文本来就是被排除的源）。
+//        · 顺带：UiInvoke 原来 `catch { }` 静默吞掉界面刷新异常，
+//          导致"日志说搜到 N 条、列表却是空的"这种排查地狱。现在会记日志。
+//        · 顺带：任务队列搜到多条时原来无脑取 found[0]（静默下错书），
+//          改成按标题精确匹配，对不上就跳过并列出候选。
 // 1.5.3：修掉**界面日志区中文变方框**（1.5.2 修的是控制台，不是这个）。
 //        · 上一版方向判错了：用户截图里 ASCII 完全正常（18:39:21、curl、
 //          settings.ini），**只有中文是方框** —— 那是 tofu，不是乱码；
@@ -85,6 +99,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.3.0")]
-[assembly: AssemblyFileVersion("1.5.3.0")]
-[assembly: AssemblyInformationalVersion("1.5.3")]
+[assembly: AssemblyVersion("1.5.4.0")]
+[assembly: AssemblyFileVersion("1.5.4.0")]
+[assembly: AssemblyInformationalVersion("1.5.4")]

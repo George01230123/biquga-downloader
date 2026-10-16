@@ -104,7 +104,15 @@ namespace TomatoBiquga
                 {
                     new[] { "searchkey", "%s" },
                 },
-                SearchResultMustContainKeyword = true,
+                // ★ 这里**不能**开 SearchResultMustContainKeyword。
+                //   实测（2026-10-16，用户报"搜不到万妖圣祖"）：
+                //     搜「万妖圣祖」→ 页面里**有 50 条书籍链接**，
+                //                     但页面不回显关键词 → 被整批误杀成"无结果"
+                //     搜「万相之王」→ 页面恰好回显了关键词 → 能用
+                //   于是表现为"同一个站有的词能搜有的不能"，用户完全无法理解。
+                //   判断依据不该是"整页有没有这几个字"：那是把"站点回显搜索框内容"
+                //   误当成"站点按关键词检索了"。详见 SiteRule 里该字段的注释。
+                SearchResultMustContainKeyword = false,
                 BookLinkPatterns = new[]
                 {
                     "<td class=\"odd\"><a href=\"(/\\d+_\\d+/)\"[^>]*>",

@@ -2608,6 +2608,95 @@ namespace TomatoBiquga
 
             // ---------- 界面字体：日志区中文不能变方框 ----------
             TestUiFont();
+
+            // ---------- 队列选书：搜到多条时不能静默下错书 ----------
+            TestQueuePickByTitle();
+
+            // ---------- 关键词检查开关：它曾整批误杀真结果 ----------
+            TestKeywordGuardSwitch();
+        }
+
+        /// <summary>
+        /// <c>SearchResultMustContainKeyword</c> 必须默认关闭。
+        ///
+        /// ★ 真实故障（2026-10-16，用户报"搜万妖圣祖搜不到"）：
+        ///   笔尖中文搜「万妖圣祖」时页面里**有 50 条书籍链接**，
+        ///   但页面**不回显关键词**（站点是模糊匹配，结果标题里也不含那四个字），
+        ///   于是被这个检查判成"无结果"，50 条全丢。
+        ///   而搜「万相之王」时页面恰好回显了关键词 → 又能用。
+        ///   现象就是"同一个站，有的词能搜、有的词不能"，用户完全无法理解。
+        ///
+        ///   根因是判断依据错了：它拿"整页 HTML 里有没有这几个字"当作
+        ///   "站点有没有按关键词检索"，而前者只等于"站点有没有回显搜索框内容"。
+        /// </summary>
+        private static void TestKeywordGuardSwitch()
+        {
+            var rules = SiteRules.All();
+            Check("关键词检查：规则表非空（否则本条测试是空转）", rules.Count > 0);
+            foreach (var rule in rules)
+            {
+                Check("关键词检查：" + rule.Key + " 没有开 SearchResultMustContainKeyword",
+                    !rule.SearchResultMustContainKeyword);
+            }
+        }
+
+        /// <summary>
+        /// 任务队列按标题消歧。
+        ///
+        /// ★ 原来这里是无脑 <c>found[0]</c> —— 用户输入的是**书名**而不是选中项，
+        ///   搜到多条时替他挑第一条就是**静默下错书**（同名书、山寨书、
+        ///   同作者别的作品都可能排在前面），而日志滚过去根本看不见。
+        ///   现在改成：能按标题精确对上才下，对不上就跳过并列出候选。
+        /// </summary>
+        private static void TestQueuePickByTitle()
+        {
+            Func<string, BookInfo> mk = delegate (string t)
+            {
+                return new BookInfo { Title = t, Url = "http://x/" + t };
+            };
+
+            // ① 只有一条 —— 直接用（没有歧义）
+            var one = new List<BookInfo> { mk("剑来") };
+            Check("队列选书：只有一条时直接用", MainForm.PickByTitle(one, "随便什么") == one[0]);
+
+            // ② 多条里有标题完全相同的 —— 挑中它，而不是第一条
+            var many = new List<BookInfo> { mk("剑来：小镇签到十年"), mk("剑来"), mk("剑来（校对版）") };
+            var hit = MainForm.PickByTitle(many, "剑来");
+            Check("队列选书：多条时挑标题完全相同的（而不是第一条）",
+                hit != null && hit.Title == "剑来");
+
+            // ③ 站点的标题带书名号，用户输入的不带
+            var marks = new List<BookInfo> { mk("《剑来》外传"), mk("《剑来》") };
+            var hit2 = MainForm.PickByTitle(marks, "剑来");
+            Check("队列选书：能忽略标题里的书名号",
+                hit2 != null && hit2.Title == "《剑来》");
+
+            // ④ 全都对不上 —— 必须返回 null（宁可漏，不下错）
+            var none = new List<BookInfo> { mk("剑来：小镇签到十年"), mk("剑来外传") };
+            Check("队列选书：没有精确匹配时返回 null（不猜第一条）",
+                MainForm.PickByTitle(none, "剑来") == null);
+
+            // ⑤ 大小写与首尾空白
+            var en = new List<BookInfo> { mk("Other Book"), mk("My Novel"), mk("Third") };
+            var hit3 = MainForm.PickByTitle(en, "  my novel  ");
+            Check("队列选书：忽略大小写与首尾空白",
+                hit3 != null && hit3.Title == "My Novel");
+
+            // ⑥ 边界
+            Check("队列选书：空列表返回 null",
+                MainForm.PickByTitle(new List<BookInfo>(), "x") == null);
+            Check("队列选书：null 返回 null", MainForm.PickByTitle(null, "x") == null);
+            Check("队列选书：空关键词不匹配", MainForm.PickByTitle(many, "   ") == null);
+
+            // ⑦ 真事：笔趣阁365 搜"剑来"第一条是山寨书。
+            //    这条钉住"绝不能因为第一条名字像就下它"。
+            var fakeLike = new List<BookInfo>
+            {
+                mk("剑来：小镇签到十年，截胡宁姚"),
+                mk("剑来"),
+            };
+            Check("队列选书：山寨书排第一时也不会被选中",
+                MainForm.PickByTitle(fakeLike, "剑来").Title == "剑来");
         }
 
         /// <summary>

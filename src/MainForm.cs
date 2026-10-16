@@ -2570,12 +2570,34 @@ namespace TomatoBiquga
         private void UiInvoke(Action a)
         {
             if (IsDisposed) return;
-            try
+            if (InvokeRequired)
             {
-                if (InvokeRequired) BeginInvoke(a);
-                else a();
+                // ★ 跨线程这条路必须包一层"带日志"的委托。
+                //   原来直接 BeginInvoke(a)：委托体在 UI 线程抛的异常会被
+                //   WinForms 的未处理异常机制吃掉/弹框，**调用方完全不知道**，
+                //   现象就是"日志说搜到了 N 条，可列表是空的" —— 排查时毫无线索。
+                //   包一层之后至少能在日志里留下痕迹。
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate ()
+                    {
+                        try { a(); }
+                        catch (Exception ex)
+                        {
+                            try { Log("界面刷新出错（已忽略）：" + ex.GetType().Name + " / " + ex.Message); }
+                            catch { }
+                        }
+                    });
+                }
+                catch { /* 窗体正在销毁，BeginInvoke 会抛 */ }
+                return;
             }
-            catch { /* 窗口关闭中 */ }
+            try { a(); }
+            catch (Exception ex)
+            {
+                try { Log("界面刷新出错（已忽略）：" + ex.GetType().Name + " / " + ex.Message); }
+                catch { }
+            }
         }
 
         /// <summary>
@@ -3683,6 +3705,50 @@ namespace TomatoBiquga
         /// 单本失败不影响后面的书（catch 住继续），这是挂机场景的硬要求：
         /// 睡前排 5 本，不能因为第 2 本站点抽风就整晚只下了一本。
         /// </summary>
+        /// <summary>
+        /// 从搜索结果里按**标题精确匹配**挑出用户要的那本；挑不出来返回 null。
+        ///
+        /// 为什么要它：任务队列里用户输入的是**书名**（不是选中项），
+        /// 所以搜到多条时"替他挑第一条"就是静默下错书 —— 同名书、山寨书、
+        /// 同作者不同作品全都可能排在前面。宁可跳过并让他写全书名。
+        ///
+        /// 匹配规则（从严到宽，命中即返回）：
+        ///   ① 标题与关键词完全相同（忽略首尾空白与大小写）
+        ///   ② 标题去掉书名号《》后与关键词相同 —— 站点常把《》写进标题
+        ///   ③ 只有一条候选时直接用它（没有歧义）
+        /// 其余情况一律返回 null，由调用方报告并列候选。
+        /// </summary>
+        internal static BookInfo PickByTitle(System.Collections.Generic.List<BookInfo> found, string keyword)
+        {
+            if (found == null || found.Count == 0) return null;
+            if (found.Count == 1) return found[0];          // ③ 没有歧义
+
+            string kw = NormTitle(keyword);
+            if (kw.Length == 0) return null;
+
+            foreach (var b in found)                        // ① 完全相同
+                if (b != null && NormTitle(b.Title) == kw) return b;
+
+            foreach (var b in found)                        // ② 去掉书名号后相同
+                if (b != null && TrimBookMarks(NormTitle(b.Title)) == TrimBookMarks(kw)) return b;
+
+            return null;
+        }
+
+        /// <summary>标题归一化：去首尾空白 + 转小写（英文书名大小写不该影响匹配）</summary>
+        private static string NormTitle(string s)
+        {
+            return s == null ? "" : s.Trim().ToLowerInvariant();
+        }
+
+        /// <summary>去掉书名号与空格 —— 站点常把《》写进标题，用户输入的没有</summary>
+        private static string TrimBookMarks(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("《", "").Replace("》", "")
+                    .Replace("〈", "").Replace("〉", "").Replace(" ", "");
+        }
+
         private void RunQueue(System.Collections.Generic.List<string> keywords, Action<string> log, Func<bool> canceled)
         {
             int n = keywords.Count;
@@ -3706,16 +3772,39 @@ namespace TomatoBiquga
                     }
 
                     // 1) 找书
+                    //
+                    // ★ 这里原来是无脑 `target = found[0]` —— 只在日志里写一句
+                    //   "搜到 N 条，取第一条"。用户输入的是**书名**、不是选中项，
+                    //   所以搜到多条时"替他挑第一条"就是在**静默下错书**：
+                    //   日志滚过去就看不见了，最后得到一本同名/山寨的书。
+                    //   现在改成先按标题精确匹配消歧，消歧不了就**明说并跳过** ——
+                    //   漏一本是看得见的失败，下错一本是看不见的失败。
                     if (target == null)
                     {
                         var found = _site.Search(kw, log);
+                        // 缓存命中时 Search 可能不写日志，这里补一句，免得日志里什么都没有
+                        if (found != null && found.Count > 0)
+                            log(string.Format("  搜索返回 {0} 条。", found.Count));
                         if (found == null || found.Count == 0)
                         {
                             log("  没搜到这本书，跳过。");
                             continue;
                         }
-                        target = found[0];
-                        if (found.Count > 1) log(string.Format("  搜到 {0} 条，取第一条：《{1}》", found.Count, target.Title));
+                        target = PickByTitle(found, kw);
+                        if (target == null)
+                        {
+                            log(string.Format("  ⚠ 搜到 {0} 条，但**没有一条标题和「{1}」精确对上**，为免下错书已跳过：",
+                                found.Count, kw));
+                            foreach (var cand in found)
+                            {
+                                log("      · 《" + cand.Title + "》" +
+                                    (string.IsNullOrEmpty(cand.Author) ? "" : "  作者：" + cand.Author));
+                            }
+                            log("    请把书名写全（或直接把书籍链接粘进队列）再跑一次。");
+                            continue;
+                        }
+                        if (found.Count > 1)
+                            log(string.Format("  搜到 {0} 条，按标题精确匹配选中：《{1}》", found.Count, target.Title));
                     }
 
                     // 2) 目录
