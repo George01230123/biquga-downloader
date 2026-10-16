@@ -461,7 +461,11 @@ namespace TomatoBiquga
             lstBooks.Columns.Add("书名", 300);
             lstBooks.Columns.Add("作者", 140);
             lstBooks.Columns.Add("分类", 100);
-            lstBooks.Columns.Add("备注", 380);
+            // 「来源」列：跨站搜索时一眼看出这本书来自哪个站。
+            // 起因：用户搜《万妖圣祖》，笔尖中文没有、笔趣阁有 ——
+            // 结果列表必须能直接标出来，否则他只能一个个站点手动试。
+            lstBooks.Columns.Add("来源", 96);
+            lstBooks.Columns.Add("备注", 300);
             lstBooks.DoubleClick += (s, e) => DoLoadBook();
 
             var bookBar = new Panel { Dock = DockStyle.Top, Height = 24 };
@@ -898,8 +902,20 @@ namespace TomatoBiquga
                     var it = new ListViewItem(b.Title);
                     it.SubItems.Add(b.Author);
                     it.SubItems.Add(b.Category);
+                    it.SubItems.Add(SiteLabelOfBook(b));
                     it.SubItems.Add(b.Desc);
                     it.Tag = b;
+
+                    // ★ 只沾边的结果（站点单字模糊匹配的产物）用灰字显示。
+                    //   起因：用户搜「万妖圣祖」，笔尖中文倒了 50 条
+                    //   《圣妖之祖》《大明圣祖》《人道圣祖》…… 用户问
+                    //   "这些跟万妖圣祖有什么关系吗"。
+                    //   排序能把它压下去，但**压下去不等于看得出来** ——
+                    //   灰掉它，用户一眼就知道"这几条不是我要的，这站没有"。
+                    int sc = TitleScore(b == null ? null : b.Title, kwForSort);
+                    if (kwForSort.Length > 0 && sc > 0 && sc < 600)
+                        it.ForeColor = Color.FromArgb(150, 150, 150);
+
                     lstBooks.Items.Add(it);
                 }
                 if (lstBooks.Items.Count > 0) lstBooks.Items[0].Selected = true;
@@ -1124,8 +1140,147 @@ namespace TomatoBiquga
                 {
                     _currentBook = null;
                     DoLoadBookCore(list[0], site);
+                    return;
+                }
+
+                // ★ 搜到了、但**一条都不沾边**时，顺手问问别的站有没有。
+                //
+                //   起因（用户实测）：他搜《万妖圣祖》，工具默认用笔尖中文（评分最快），
+                //   而那站**根本没有这本书** —— 返回 50 条按单字匹配的
+                //   《圣妖之祖》《大明圣祖》《人道圣祖》。用户翻遍了也找不到，
+                //   结论是"连搜都搜不出来"。
+                //   实测《万妖圣祖》只在笔趣阁上有（PC/移动版第一条就是它）。
+                //
+                //   站点之间收录差异是常态，工具不该让用户自己去猜哪个站有。
+                //   这里的判据很保守：**一个"整词命中"都没有**才去问别的站。
+                bool anyGood = false;
+                if (list != null)
+                    foreach (var b in list)
+                        if (b != null && TitleScore(b.Title, kw) >= 600) { anyGood = true; break; }
+                if (!anyGood && list != null && list.Count > 0)
+                {
+                    Log("⚠ 「" + SiteRegistry.LabelOf(searchSiteKey) + "」返回的 " + list.Count
+                        + " 条里没有一条标题含「" + kw + "」—— 换个源找找看…");
+                    var hits = ScanOtherSitesForExact(kw, searchSiteKey);
+                    if (hits != null && hits.Count > 0)
+                    {
+                        foreach (var h in hits)
+                            Log("   · 「" + h.SiteLabel + "」有：" + h.Book.Title
+                                + (string.IsNullOrEmpty(h.Book.Author) ? "" : "  作者：" + h.Book.Author));
+                        Log("   → 在「站点」下拉框里切到该站，再点「搜索」即可。");
+                    }
+                    else
+                    {
+                        Log("   · 其他站点也没找到标题含「" + kw + "」的书。");
+                    }
                 }
             });
+        }
+
+        /// <summary>
+        /// 这本书来自哪个站，用于结果列表的「来源」列。
+        /// BookInfo.Site 为空时退到"当前站点"。
+        /// </summary>
+        private string SiteLabelOfBook(BookInfo b)
+        {
+            // 直接用 SiteRegistry.LabelOf：它对"注册表里没有的老 key"也会原样返回，
+            // 和 BookshelfDialog 里那个同名私有方法行为一致。
+            // （不要去调那个私有方法 —— 它是对话框的，MainForm 这里够不着。）
+            if (b == null || string.IsNullOrEmpty(b.Site)) return SiteRegistry.LabelOf(SiteKeyOf(_site));
+            return SiteRegistry.LabelOf(b.Site);
+        }
+
+        /// <summary>
+        /// 按**书自己所属的站点**造一个站点实例。
+        ///
+        /// ★ 为什么要这样：跨站搜索的结果可能来自别的站，而 `_site` 是当前下拉框选的站。
+        ///   如果拿 `_site` 去 LoadBook 一本取自别的站的书，就会用错的站点规则
+        ///   去解析它的页面 —— 结果是"载入失败"或"载入成别的书"。
+        ///   书自己带着 Site 字段，就该按它来。
+        /// </summary>
+        private ISite SiteForBook(BookInfo b)
+        {
+            string key = (b == null || string.IsNullOrEmpty(b.Site)) ? null : b.Site;
+            if (!string.IsNullOrEmpty(key))
+            {
+                var d = SiteRegistry.ByKey(key);
+                if (d != null)
+                {
+                    var s = d.Factory();
+                    if (s != null) return s;
+                }
+            }
+            return _site;
+        }
+
+        /// <summary>
+        /// 到**其他站点**去找标题精确命中 kw 的书（不含当前站）。
+        ///
+        /// 为什么单独做这趟：站点之间收录差异很大，实测《万妖圣祖》只在笔趣阁上有，
+        /// 而"评分最快"的笔尖中文没有 —— 用户按提示换源之前，先替他确认一下哪个站有，
+        /// 比让他一个个手动试要省事得多。
+        ///
+        /// 保守之处：只回报**标题含整词**（score ≥ 600）的结果，避免把
+        /// "按单字沾边"的那一堆噪音也报成"这个站有"。
+        /// </summary>
+        private List<SiteBookHit> ScanOtherSitesForExact(string kw, string skipSiteKey)
+        {
+            if (_cancel) return new List<SiteBookHit>();
+            return ScanSitesForExact(kw, skipSiteKey, delegate (string s) { Log(s); });
+        }
+
+        /// <summary>
+        /// 跨站扫描的**纯逻辑**（不依赖窗体，便于自动化测试）。
+        ///
+        /// 只回报"标题含整词"（score ≥ 600）的命中 —— 不能把"按单字沾边"
+        /// 的那一堆噪音报成"这个站有"，否则用户白高兴一场。
+        /// </summary>
+        internal static List<SiteBookHit> ScanSitesForExact(string kw, string skipSiteKey, Action<string> log)
+        {
+            var hits = new List<SiteBookHit>();
+            if (string.IsNullOrEmpty(kw)) return hits;
+            foreach (var d in SiteRegistry.All)
+            {
+                if (string.Equals(d.Key, skipSiteKey, StringComparison.OrdinalIgnoreCase)) continue;
+                if (d.Factory == null) continue;
+                try
+                {
+                    var s = d.Factory();
+                    if (s == null) continue;
+                    var found = s.Search(kw, null);      // log 传 null：这趟是探测，别刷屏
+                    if (found == null)
+                    {
+                        if (log != null) log("   · 「" + d.DisplayName + "」搜索无结果");
+                        continue;
+                    }
+                    BookInfo best = null;
+                    int bestScore = 0;
+                    foreach (var b in found)
+                    {
+                        if (b == null || string.IsNullOrEmpty(b.Title)) continue;
+                        int sc = TitleScore(b.Title, kw);
+                        if (sc < 600) continue;
+                        if (best == null || sc > bestScore) { best = b; bestScore = sc; }
+                    }
+                    if (best != null)
+                    {
+                        // 记住它来自哪个站 —— 载入/下载要按这个站去取
+                        best.Site = d.Key;
+                        hits.Add(new SiteBookHit { SiteKey = d.Key, SiteLabel = d.DisplayName, Book = best });
+                        if (log != null)
+                            log("   · 「" + d.DisplayName + "」有：《" + best.Title + "》（" + found.Count + " 条里命中）");
+                    }
+                    else if (log != null)
+                    {
+                        log("   · 「" + d.DisplayName + "」" + found.Count + " 条，没有标题含「" + kw + "」的");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (log != null) log("   · 「" + d.DisplayName + "」搜索失败：" + ex.Message);
+                }
+            }
+            return hits;
         }
 
         /// <summary>番茄站的中文搜索：没有公开接口，改为打开官网搜索页，再让用户把链接贴回来</summary>
@@ -1215,10 +1370,22 @@ namespace TomatoBiquga
                 return;
             }
             var book = lstBooks.SelectedItems[0].Tag as BookInfo;
-            var site = _site;
-            // 载入目录前先确认站点可用：不可用就提示换源（探活结果由启动时/手动检测得到）
-            if (!EnsureSiteUsable()) return;
-            site = _site;       // EnsureSiteUsable 可能切了站点，重新取一次
+
+            // ★ 用**书自己所属的站点**，不是当前下拉框选的那个。
+            //   跨站搜索结果里可能混着别的站的书 —— 拿当前站点的规则去解析
+            //   别的站的页面，会载入失败或载入成别的书。
+            var site = SiteForBook(book);
+            string bookSiteKey = book == null || string.IsNullOrEmpty(book.Site) ? SiteKeyOf(site) : book.Site;
+            if (!string.Equals(bookSiteKey, SiteKeyOf(_site), StringComparison.OrdinalIgnoreCase))
+                Log("这本书来自「" + SiteRegistry.LabelOf(bookSiteKey) + "」，将用该站点的规则载入目录。");
+
+            // 载入目录前先确认**这本书所属的站点**可用：不可用就提示换源
+            // （探活结果由启动时/手动检测得到）
+            if (string.Equals(bookSiteKey, SiteKeyOf(_site), StringComparison.OrdinalIgnoreCase))
+            {
+                if (!EnsureSiteUsable()) return;
+                site = _site;       // EnsureSiteUsable 可能切了站点，重新取一次
+            }
             SetRefresh(site, forceRefresh);
             RunBackground("载入目录中…", () => DoLoadBookCore(book, site));
         }
@@ -2098,7 +2265,9 @@ namespace TomatoBiquga
             }
 
             var book = _currentBook;
-            var site = _site;
+            // ★ 下载也用**书自己所属的站点**（跨站搜来的书可能不是当前选中的站）。
+            //   和 DoLoadBook 同一个理由：站点规则不能张冠李戴。
+            var site = SiteForBook(book);
             var root = txtOutput.Text.Trim();
             if (root.Length == 0) root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "下载");
             var chapters = picked;
@@ -4140,6 +4309,21 @@ namespace TomatoBiquga
             }
             log("===== 队列结束 =====");
         }
+    }
+
+    /// <summary>
+    /// 一次跨站搜索的命中：书 + 它来自哪个站点。
+    ///
+    /// ★ 必须放在**文件作用域**（这里），不能放进 MainForm 里面 ——
+    ///   我第一版把它插在 MainForm 的方法中间，那等于把 MainForm 提前闭合，
+    ///   后面所有方法都掉进了这个类的作用域，编译直接报一串
+    ///   "The name 'SiteLabel' does not exist in the current context"。
+    /// </summary>
+    internal sealed class SiteBookHit
+    {
+        public string SiteKey;
+        public string SiteLabel;
+        public BookInfo Book;
     }
 
     /// <summary>

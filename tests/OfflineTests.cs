@@ -2620,6 +2620,55 @@ namespace TomatoBiquga
 
             // ---------- 搜索结果按相关度排序 ----------
             TestSearchRelevance();
+
+            // ---------- 跨站找书：一站没有时能不能发现别的站有 ----------
+            TestCrossSiteFilter();
+        }
+
+        /// <summary>
+        /// 跨站扫描的**筛选规则**：只认"标题含整词"的命中（score ≥ 600）。
+        ///
+        /// ★ 真实场景（用户实测）：搜《万妖圣祖》时工具默认用笔尖中文
+        ///   （评分最快），而那站**根本没有这本书** —— 返回 50 条按单字匹配的
+        ///   《圣妖之祖》《大明圣祖》。用户翻遍了也找不到，结论是"连搜都搜不出来"。
+        ///   实测这本书在笔趣阁（PC / 移动版 / 365）上都有。
+        ///
+        ///   修法：一个"整词命中"都没有时自动扫描其他站，报告哪个站有。
+        ///   这条测试钉住**筛选的严格性** —— 绝不能把"按单字沾边"的那堆噪音
+        ///   报成"这个站有"，那样用户白高兴一场。
+        ///
+        ///   （真实联网的扫描另有 CrossSite 探针实测过：找出了 3 个站点有这本书。）
+        /// </summary>
+        private static void TestCrossSiteFilter()
+        {
+            // 这批是笔尖中文对「万妖圣祖」的**真实返回顺序**
+            var noise = new List<BookInfo>();
+            foreach (var t in new[] { "圣妖之祖", "万妖之祖", "万妖剑祖", "万骨妖祖",
+                                      "蜀山万妖之祖", "妖祖", "大明圣祖", "人道圣祖" })
+                noise.Add(new BookInfo { Title = t, Url = "http://x/" + t });
+
+            // 按跨站扫描的判据（>= 600）筛一遍 —— 必须一条都不剩
+            int passed = 0;
+            foreach (var b in noise)
+                if (MainForm.TitleScore(b.Title, "万妖圣祖") >= 600) passed++;
+            Eq("跨站筛选：沾边的 8 条噪音一条都不能通过（>=600）", 0, passed);
+
+            // 真有这本书时必须通过
+            var real = new List<BookInfo>();
+            foreach (var t in new[] { "万妖圣祖", "《万妖圣祖》", "万妖圣祖项尘" })
+                real.Add(new BookInfo { Title = t, Url = "http://x/" + t });
+            foreach (var b in real)
+                Check("跨站筛选：《" + b.Title + "》必须通过",
+                    MainForm.TitleScore(b.Title, "万妖圣祖") >= 600);
+
+            // 多条命中时挑最相关的那条
+            BookInfo best = null; int bestScore = 0;
+            foreach (var b in real)
+            {
+                int sc = MainForm.TitleScore(b.Title, "万妖圣祖");
+                if (best == null || sc > bestScore) { best = b; bestScore = sc; }
+            }
+            Eq("跨站筛选：多条命中时挑最相关的那条", "万妖圣祖", best.Title);
         }
 
         /// <summary>
