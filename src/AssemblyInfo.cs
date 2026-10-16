@@ -23,6 +23,19 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.5.5：**诊断版** —— 不修 bug，是给"搜到了但列表不显示"装仪表。
+//        背景：用户报"搜到 50 条，列表空白"，我在本地用真实索引、
+//        真实 UI 流程反复复现都正常（探针实测 FillBooks 能填进 3 项）。
+//        既然复现不了，就把关键中间量打进日志，让用户那边一次定位：
+//        · FillBooks 落库后**立刻回读**列表项数并写日志 ——
+//          能直接分清"项没加进去"还是"加进去了但没显示"
+//        · 同时打印结果区高度与分隔条位置 —— 结果是"被挤没了"还是"真没内容"
+//        · Common 层的日志接通到界面（新增 Log.Sink）：
+//          Log.Line 原来只写 Console，而 GUI(winexe) 没有控制台，
+//          所以"搜索索引读取失败"这类关键线索在界面里**根本看不到**
+//        · SearchIndex 的两个 `catch { }` 开口：读/写索引失败原来静默降级，
+//          现在会写日志（磁盘满、U 盘写保护、杀软锁文件都会走到那）
+//        ⚠ 没修掉问题本身 —— 因为还没定位到。等用户回传日志。
 // 1.5.4：修掉「有的词搜不出来」—— 关键词检查整批误杀真结果。
 //        · 现象（用户报"搜万妖圣祖搜不到"）：同一个站，搜《万相之王》能搜到、
 //          搜《万妖圣祖》就"无结果"，用户完全无法理解。
@@ -99,6 +112,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.4.0")]
-[assembly: AssemblyFileVersion("1.5.4.0")]
-[assembly: AssemblyInformationalVersion("1.5.4")]
+[assembly: AssemblyVersion("1.5.5.0")]
+[assembly: AssemblyFileVersion("1.5.5.0")]
+[assembly: AssemblyInformationalVersion("1.5.5")]

@@ -102,7 +102,48 @@ namespace TomatoBiquga
             AutoScaleDimensions = new SizeF(7F, 15F);   // 9pt 微软雅黑在 96dpi 下的高度
             // 先加载设置再建界面：BuildUi 会在日志里打印当前设置
             _settings = AppSettings.Current;
+
+            // ★ 把 Common 层的日志接到界面日志区。
+            //   原因：Log.Line 原来只写 Console，而 GUI(winexe) 进程没有控制台 ——
+            //   Common 层写的诊断信息在界面里**根本看不到**，排查真实故障时一片黑
+            //   （"搜索索引读取失败"这种关键线索就是这么消失的）。
+            //
+            //   ★★ 必须直接追加到控件，**不能**绕回 MainForm.Log：
+            //   一旦 Log() 内部（现在或以后）又调了 Log.Line，就变成
+            //   Log.Line → Sink → MainForm.Log → Log.Line → … 无限递归。
+            //   直接追加是这条链路的终点，最安全。
+            //
+            //   这里要写全限定名：MainForm 自己有个 Log(string) 方法，
+            //   直接写 `Log.Sink` 会被解析成那个方法（实测编译报 CS0119）。
+            TomatoBiquga.Log.Sink = delegate (string line) { AppendToLogBox(line + Environment.NewLine); };
+
             BuildUi();
+        }
+
+        /// <summary>
+        /// 只往日志控件追加文本（跨线程安全）。**不写 Console、不碰 Log.Line** ——
+        /// 它是日志链路的终点，往上再绕一圈就会递归。
+        /// </summary>
+        private void AppendToLogBox(string text)
+        {
+            try
+            {
+                if (txtLog == null || txtLog.IsDisposed) return;
+                var box = txtLog;
+                Action append = delegate ()
+                {
+                    try
+                    {
+                        box.AppendText(text);
+                        if (box.TextLength > 400000)
+                            box.Text = box.Text.Substring(box.TextLength - 200000);
+                    }
+                    catch { }
+                };
+                if (box.InvokeRequired) { try { box.BeginInvoke(append); } catch { } }
+                else append();
+            }
+            catch { }
         }
 
         // ------------------------------------------------------------ 界面
@@ -769,6 +810,23 @@ namespace TomatoBiquga
                     lstBooks.Items.Add(it);
                 }
                 if (lstBooks.Items.Count > 0) lstBooks.Items[0].Selected = true;
+
+                // ★ 落库后立刻回读一次并写日志。
+                //   起因：用户两次反馈"日志说搜到 N 条、列表却是空的"，
+                //   而我在本地怎么都复现不出来。加这一句之后，用户那边的日志
+                //   就能直接告诉我们是"项根本没加进去"还是"加进去了但没显示"
+                //   （后者要连带看下面的几何信息）。
+                int shown = lstBooks.Items.Count;
+                int nonEmpty = 0;
+                for (int i = 0; i < shown; i++)
+                    if (!string.IsNullOrEmpty(lstBooks.Items[i].Text)) nonEmpty++;
+                Log(string.Format("结果列表已更新：收到 {0} 条 → 列表 {1} 项（其中标题非空 {2} 项）",
+                    list == null ? 0 : list.Count, shown, nonEmpty));
+                Log(string.Format("  · 结果区高度 {0}px / 分隔条位置 {1}（{2}）",
+                    lstBooks.Height, _split == null ? -1 : _split.SplitterDistance,
+                    lstBooks.Height >= 40 ? "能看见" : "!! 被挤没了，请往上拖分隔条"));
+                if (list != null && list.Count > 0 && shown == 0)
+                    Log("  !! 收到了结果但一项都没进列表 —— 这是程序 bug，请把这段日志发给我");
             });
         }
 

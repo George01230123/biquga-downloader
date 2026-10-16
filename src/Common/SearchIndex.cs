@@ -154,7 +154,14 @@ namespace TomatoBiquga
                         }
                     }
                 }
-                catch { /* 文件坏了就当空索引，不能因为缓存坏了让搜索不可用 */ }
+                catch (Exception ex)
+                {
+                    // ★ 原来这里是 `catch { }` —— 文件读不了/JSON 坏了就**静默**当空索引，
+                    //   于是"本地查"突然什么都查不到，而用户和排查的人都没有任何线索。
+                    //   现在照旧降级（不能因为缓存坏了让搜索不可用），但必须留证据。
+                    Log.Line("搜索索引读取失败，本次按空索引处理：" + ex.GetType().Name
+                        + " / " + ex.Message + "  文件=" + FilePath);
+                }
                 _cache = s;
                 return _cache;
             }
@@ -171,7 +178,14 @@ namespace TomatoBiquga
                     var json = new JavaScriptSerializer().Serialize(s);
                     File.WriteAllText(FilePath, json, new UTF8Encoding(false));
                 }
-                catch { /* 写不进去也不该影响这次搜索的结果展示 */ }
+                catch (Exception ex)
+                {
+                    // 同样：写入失败不影响这次搜索，但必须留证据 ——
+                    // 否则表现为"搜到了但下次就没了/本地查永远空"，无从查起。
+                    // 只读介质（U 盘写保护）、磁盘满、杀软锁文件都会走到这里。
+                    Log.Line("搜索索引写入失败（本次结果仍会显示，但不会留住）："
+                        + ex.GetType().Name + " / " + ex.Message + "  文件=" + FilePath);
+                }
             }
         }
 
