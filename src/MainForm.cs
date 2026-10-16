@@ -317,7 +317,10 @@ namespace TomatoBiquga
                 ScrollBars = ScrollBars.Vertical,
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(250, 250, 250),
-                Font = new Font("Consolas", 8.5F),
+                // ★ 不能用 Consolas：它不含汉字字形，中文会渲染成方框（tofu）。
+                //   实测用户界面上日志区整片方框、而 ASCII 正常 —— 就是缺字形，
+                //   不是编码问题（编码错的话 ASCII 也会坏）。见 UiFont 的注释。
+                Font = UiFont.Mono(8.5F),
             };
 
             var logBox = new Panel { Dock = DockStyle.Fill };
@@ -3815,7 +3818,8 @@ namespace TomatoBiquga
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 Dock = DockStyle.Fill,
-                Font = new Font("Consolas", 9.5F),
+                // ★ 同上：这个框里填的是**中文书名**，用 Consolas 会显示成方框。
+                Font = UiFont.Mono(9.5F),
             };
             WatermarkExt.SetHint(_input, "牧神记\r\n全职高手\r\n番茄：某本番茄的书", this);
             // 带回去上次没下完的队列（队列是"睡前排 5 本"的用法，

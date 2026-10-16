@@ -23,7 +23,22 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
-// 1.5.2：修掉控制台中文乱码（用户直接反馈："运行出来全是乱码"）。
+// 1.5.3：修掉**界面日志区中文变方框**（1.5.2 修的是控制台，不是这个）。
+//        · 上一版方向判错了：用户截图里 ASCII 完全正常（18:39:21、curl、
+//          settings.ini），**只有中文是方框** —— 那是 tofu，不是乱码；
+//          乱码的话 ASCII 会一起坏。方框的成因是**字体里没有那个字的字形**。
+//        · 真凶：日志控件写死了 `new Font("Consolas", 8.5F)`，
+//          **Consolas 是纯拉丁字体、不含任何汉字字形**，平时靠 Windows 的
+//          字体链接(font linking)兜底，那在部分机器上不生效。
+//          实测（GDI GetGlyphIndicesW 数 0xFFFF = 缺字形）：
+//            Consolas            30/30 字缺字形 → 全变方框
+//            Microsoft YaHei UI   0/30        → 全覆盖
+//            MS Gothic           10/30        → 部分缺
+//        · 修法：新增 src/Common/UiFont.cs，按"优先等宽、但不牺牲中文"
+//          挑字体并带回退；把两处写死的 Consolas（日志区、多本书输入框）换掉。
+//        · 加了 10 条回归断言（TestUiFont），其中直接挖 MainForm 的 txtLog
+//          字段查它实际用的字体 —— 故意改回 Consolas 实测会红 5 条。
+// 1.5.2：修掉**控制台**中文乱码 + GUI --selftest 无输出。
 //        · 根因：程序写的是**正确的 UTF-8 字节**，但 Windows 控制台默认按
 //          GBK(936) 解码 → 乱码。而"真实控制台"与"重定向到文件"是**两条
 //          不同的编码路径**，原来只处理了后者（只设 Console.OutputEncoding）：
@@ -70,6 +85,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.2.0")]
-[assembly: AssemblyFileVersion("1.5.2.0")]
-[assembly: AssemblyInformationalVersion("1.5.2")]
+[assembly: AssemblyVersion("1.5.3.0")]
+[assembly: AssemblyFileVersion("1.5.3.0")]
+[assembly: AssemblyInformationalVersion("1.5.3")]

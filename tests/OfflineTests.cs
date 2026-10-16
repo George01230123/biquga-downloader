@@ -2605,6 +2605,9 @@ namespace TomatoBiquga
 
             // ---------- 界面：自动模式必须真的选中最快的那个 ----------
             TestAutoSiteSelection();
+
+            // ---------- 界面字体：日志区中文不能变方框 ----------
+            TestUiFont();
         }
 
         /// <summary>
@@ -2668,6 +2671,137 @@ namespace TomatoBiquga
             finally
             {
                 try { form.Dispose(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 界面字体必须能显示中文。
+        ///
+        /// ★ 为什么要有这条：用户反馈"运行出来全是乱码"，截图里**日志区中文全是方框**
+        ///   （而 ASCII 完全正常）。查下来不是编码问题，而是日志控件写死了
+        ///   `new Font("Consolas", 8.5F)` —— **Consolas 不含任何汉字字形**，
+        ///   平时靠 Windows 的字体链接(font linking)兜底，那在部分机器上不生效。
+        ///
+        ///   实测（GDI GetGlyphIndicesW 数 0xFFFF = 缺字形）：
+        ///     Consolas            30/30 字缺字形 → 全变方框
+        ///     Microsoft YaHei UI   0/30        → 全覆盖
+        ///
+        ///   这条测试钉住两件事：① UiFont 选出来的字体含中文；
+        ///   ② MainForm 真的把它用上了（只改 UiFont 而控件没换，照样红）。
+        /// </summary>
+        private static void TestUiFont()
+        {
+            const string sample = "日志就绪取数后端系统自带找到未找到中文测试沧元图剑来章节目录";
+
+            // ---- ① UiFont 选出来的字体必须含中文字形 ----
+            Check("界面字体：Consolas 确实缺中文字形（这就是当初方框的成因）",
+                HasMissingGlyphs("Consolas", sample));
+
+            string picked = UiFont.ResolvedName;
+            Check("界面字体：UiFont 选到了候选字体（" + picked + "）",
+                !string.IsNullOrEmpty(picked) && picked != "(回退到系统默认)");
+            Check("界面字体：选中的字体不含缺字形的中文", !HasMissingGlyphs(picked, sample));
+
+            using (var f = UiFont.Mono(8.5F))
+            {
+                Check("界面字体：UiFont.Mono 能造出字体对象", f != null);
+                if (f != null)
+                {
+                    Check("界面字体：造出来的不是 Consolas",
+                        !string.Equals(f.FontFamily.Name, "Consolas", StringComparison.OrdinalIgnoreCase));
+                    Check("界面字体：造出来的字体含中文字形",
+                        !HasMissingGlyphs(f.FontFamily.Name, sample));
+                }
+            }
+
+            // ---- ② MainForm 的日志框必须真的用上了它 ----
+            MainForm form = null;
+            try
+            {
+                form = new MainForm();
+                var fi = typeof(MainForm).GetField("txtLog",
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Public);
+                Check("界面字体：MainForm 里有 txtLog 字段（改名了这条也要跟着改）", fi != null);
+                if (fi != null)
+                {
+                    var box = fi.GetValue(form) as System.Windows.Forms.TextBox;
+                    Check("界面字体：txtLog 是 TextBox", box != null);
+                    if (box != null)
+                    {
+                        string fam = box.Font.FontFamily.Name;
+                        // ★ 这两条是回归护栏：谁把 Consolas 改回来就会红
+                        Check("界面字体：日志框没用 Consolas（实际 " + fam + "）",
+                            !string.Equals(fam, "Consolas", StringComparison.OrdinalIgnoreCase));
+                        Check("界面字体：日志框字体含中文字形（实际 " + fam + "）",
+                            !HasMissingGlyphs(fam, sample));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Check("界面字体：能构造主窗体（" + ex.Message + "）", false);
+            }
+            finally
+            {
+                try { if (form != null) form.Dispose(); } catch { }
+            }
+        }
+
+        // ---- GDI 字形覆盖检测：判定"这个字体会不会渲染成方框" ----
+        //   方框(tofu)的成因就是字体里没有那个字的字形，
+        //   GetGlyphIndicesW 对缺字形的字符返回 0xFFFF。
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        private static extern IntPtr CreateFontW(int h, int w, int esc, int orient, int weight,
+            uint italic, uint underline, uint strike, uint charset, uint outPrec, uint clipPrec,
+            uint quality, uint pitchAndFamily,
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string face);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr o);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll", EntryPoint = "GetGlyphIndicesW")]
+        private static extern uint GetGlyphIndices(IntPtr hdc,
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string text,
+            int count, [System.Runtime.InteropServices.Out] ushort[] indices, uint flags);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        /// <summary>
+        /// 这个字体里有没有渲染不出来的字（true = 会变成方框）。
+        /// ★ **一次只传一个字体名**：实测把多个字体连起来批量测时，遇到某些字体
+        ///   （如 MS Gothic）会让 GetGlyphIndicesW 直接把进程打死
+        ///   （退出码 0xE0434352），整批结果全丢。所以这里是单字体函数。
+        /// </summary>
+        private static bool HasMissingGlyphs(string fontName, string text)
+        {
+            IntPtr hdc = IntPtr.Zero, hf = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                hdc = GetDC(IntPtr.Zero);
+                if (hdc == IntPtr.Zero) return false;      // 查不了就不误报
+                hf = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, fontName);
+                if (hf == IntPtr.Zero) return false;
+                old = SelectObject(hdc, hf);
+                var idx = new ushort[text.Length];
+                if (GetGlyphIndices(hdc, text, text.Length, idx, 0x0001) == 0xFFFFFFFF) return false;
+                foreach (var g in idx) if (g == 0xFFFF) return true;
+                return false;
+            }
+            catch { return false; }
+            finally
+            {
+                try { if (old != IntPtr.Zero) SelectObject(hdc, old); } catch { }
+                try { if (hf != IntPtr.Zero) DeleteObject(hf); } catch { }
+                try { if (hdc != IntPtr.Zero) ReleaseDC(IntPtr.Zero, hdc); } catch { }
             }
         }
 
