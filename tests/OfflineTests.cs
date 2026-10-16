@@ -2617,6 +2617,71 @@ namespace TomatoBiquga
 
             // ---------- 分隔条默认位置必须稳定 ----------
             TestSplitterDefault();
+
+            // ---------- 搜索结果按相关度排序 ----------
+            TestSearchRelevance();
+        }
+
+        /// <summary>
+        /// 搜索结果必须按"跟搜索词的相关度"排序，精确匹配排最前。
+        ///
+        /// ★ 真实故障（用户实测并质疑）：搜「万妖圣祖」，笔尖中文返回 50 条，
+        ///   前 8 条是《圣妖之祖》《万妖之祖》《万妖剑祖》《万骨妖祖》
+        ///   《蜀山万妖之祖》《妖祖》《大明圣祖》《人道圣祖》——
+        ///   用户问"这些跟万妖圣祖有什么关系吗"。
+        ///
+        ///   答案：没关系。那个站点按**单字**模糊匹配，把含"妖"或"祖"的书
+        ///   全倒出来了。站点不给相关度，所以精确匹配（如果存在）会被埋在
+        ///   几十条弱相关结果里 —— 用户翻不到，看起来就像"搜不到"。
+        ///
+        ///   修法：自己按标题相关度**稳定**排序（同分保持站点原顺序）。
+        /// </summary>
+        private static void TestSearchRelevance()
+        {
+            // ---- 打分规则 ----
+            Eq("相关度：完全相同 = 1000", 1000, MainForm.TitleScore("万妖圣祖", "万妖圣祖"));
+            Eq("相关度：带书名号也算相同", 1000, MainForm.TitleScore("《万妖圣祖》", "万妖圣祖"));
+            Eq("相关度：以搜索词开头 = 800", 800, MainForm.TitleScore("万妖圣祖项尘", "万妖圣祖"));
+            Eq("相关度：包含搜索词 = 600", 600, MainForm.TitleScore("新万妖圣祖传", "万妖圣祖"));
+            Eq("相关度：搜索词包含标题 = 400", 400, MainForm.TitleScore("万妖", "万妖圣祖"));
+            // 沾边档按"命中几个字"给分。★ 这些值是**跑出来的、不是手数的** ——
+            //   《圣妖之祖》命中「妖」「圣」「祖」= 3/4（我手数成 2/4，被测试纠正）
+            Eq("相关度：沾边 3/4 字（圣妖之祖）", 175, MainForm.TitleScore("圣妖之祖", "万妖圣祖"));
+            Eq("相关度：沾边 3/4 字（万妖之祖）", 175, MainForm.TitleScore("万妖之祖", "万妖圣祖"));
+            Eq("相关度：沾边 2/4 字（妖祖）", 150, MainForm.TitleScore("妖祖", "万妖圣祖"));
+            Eq("相关度：沾边 2/4 字（大明圣祖）", 150, MainForm.TitleScore("大明圣祖", "万妖圣祖"));
+            Eq("相关度：毫不相干 = 0", 0, MainForm.TitleScore("大主宰", "万妖圣祖"));
+            Eq("相关度：空标题 = 0", 0, MainForm.TitleScore("", "万妖圣祖"));
+            Eq("相关度：空关键词 = 0", 0, MainForm.TitleScore("万妖圣祖", ""));
+
+            // ---- 排序：精确匹配必须排到最前 ----
+            // 这批就是用户实测拿到的顺序（精确匹配被埋在后面）
+            var raw = new List<BookInfo>();
+            foreach (var t in new[] { "圣妖之祖", "万妖之祖", "万妖剑祖", "万骨妖祖",
+                                      "蜀山万妖之祖", "妖祖", "大明圣祖", "人道圣祖",
+                                      "万妖圣祖" })
+                raw.Add(new BookInfo { Title = t, Url = "http://x/" + t });
+
+            var sorted = MainForm.RankByRelevance(raw, "万妖圣祖");
+            Eq("排序：条数不变", raw.Count, sorted.Count);
+            Eq("排序：精确匹配被排到第一位", "万妖圣祖", sorted[0].Title);
+            int idxFuzzy = sorted.FindIndex(delegate (BookInfo b) { return b.Title == "圣妖之祖"; });
+            int idxNoise = sorted.FindIndex(delegate (BookInfo b) { return b.Title == "大明圣祖"; });
+            Check("排序：沾边的排在毫不相干的前面",
+                idxFuzzy >= 0 && idxNoise >= 0 && idxFuzzy < idxNoise);
+
+            // ---- 稳定性：同分保持站点原顺序 ----
+            var tie = new List<BookInfo>();
+            foreach (var t in new[] { "大明圣祖", "人道圣祖", "棋道圣祖" })   // 全是 0 分
+                tie.Add(new BookInfo { Title = t, Url = "http://x/" + t });
+            var tieSorted = MainForm.RankByRelevance(tie, "万妖圣祖");
+            Eq("排序：同分时保持原顺序（第 1 个）", "大明圣祖", tieSorted[0].Title);
+            Eq("排序：同分时保持原顺序（第 2 个）", "人道圣祖", tieSorted[1].Title);
+
+            // ---- 边界 ----
+            Check("排序：空关键词不排序", MainForm.RankByRelevance(raw, "") == raw);
+            Check("排序：null 关键词不排序", MainForm.RankByRelevance(raw, null) == raw);
+            Check("排序：null 列表不炸", MainForm.RankByRelevance(null, "x") == null);
         }
 
         /// <summary>

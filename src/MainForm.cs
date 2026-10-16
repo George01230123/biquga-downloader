@@ -863,13 +863,37 @@ namespace TomatoBiquga
         /// 联网搜索的结果、以及本地缓存/索引命中的结果 —— 两条路径必须
         /// 用同一段代码填，否则"缓存命中的那批书"显示出来会和联网的不一样。
         /// </summary>
-        private void FillBooks(List<BookInfo> list)
+        private void FillBooks(List<BookInfo> list) { FillBooks(list, null); }
+
+        /// <summary>
+        /// 填搜索结果。keyword 是"用来算相关度的词"，由调用方**明确传进来**，
+        /// 而不是从 txtKeyword 现读 —— 本地查/缓存命中时用户可能已经改了输入框，
+        /// 那时按新词排序会把列表排得莫名其妙。
+        /// 传 null 表示"不排序，按站点原顺序显示"。
+        /// </summary>
+        private void FillBooks(List<BookInfo> list, string keyword)
         {
+            // ★ 先按"跟搜索词的相关度"排序，再填。
+            //
+            //   起因（用户实测）：搜「万妖圣祖」，笔尖中文返回 50 条，
+            //   前几条是《圣妖之祖》《万妖之祖》《万妖剑祖》《万骨妖祖》
+            //   《蜀山万妖之祖》《妖祖》《大明圣祖》《人道圣祖》《棋道圣祖》——
+            //   用户问"这些跟万妖圣祖有什么关系吗"。
+            //
+            //   答案是：**没关系**。那个站点是按单字模糊匹配的，把含"妖"或"祖"
+            //   的书全倒出来了。而《万妖圣祖》真在那站上时，会被埋在几十条
+            //   弱相关结果里，用户根本翻不到 —— 看起来就像"搜不到"。
+            //
+            //   站点不给相关度排序，我们自己排。排序稳定（同分保持站点原顺序），
+            //   所以结果不会跳来跳去。
+            string kwForSort = keyword == null ? "" : keyword.Trim();
+            var ranked = RankByRelevance(list, kwForSort);
+
             UiInvoke(() =>
             {
                 lstBooks.Items.Clear();
-                if (list == null) return;
-                foreach (var b in list)
+                if (ranked == null) return;
+                foreach (var b in ranked)
                 {
                     var it = new ListViewItem(b.Title);
                     it.SubItems.Add(b.Author);
@@ -890,13 +914,135 @@ namespace TomatoBiquga
                 for (int i = 0; i < shown; i++)
                     if (!string.IsNullOrEmpty(lstBooks.Items[i].Text)) nonEmpty++;
                 Log(string.Format("结果列表已更新：收到 {0} 条 → 列表 {1} 项（其中标题非空 {2} 项）",
-                    list == null ? 0 : list.Count, shown, nonEmpty));
+                    ranked == null ? 0 : ranked.Count, shown, nonEmpty));
                 Log(string.Format("  · 结果区高度 {0}px / 分隔条位置 {1}（{2}）",
                     lstBooks.Height, _split == null ? -1 : _split.SplitterDistance,
                     lstBooks.Height >= 40 ? "能看见" : "!! 被挤没了，请往上拖分隔条"));
-                if (list != null && list.Count > 0 && shown == 0)
+
+                // ★ 把"相关度分布"写出来。起因：用户搜「万妖圣祖」看到
+                //   《圣妖之祖》《大明圣祖》这种毫不相干的结果，问"这些有什么关系吗"。
+                //   原因是站点按单字模糊匹配。这里如实告诉用户：
+                //   有几条真命中、几条只是沾边、一条都不沾的有多少。
+                if (ranked != null && ranked.Count > 0 && kwForSort.Length > 0)
+                {
+                    int exact = 0, contains = 0, fuzzy = 0;
+                    foreach (var b in ranked)
+                    {
+                        int sc = TitleScore(b == null ? null : b.Title, kwForSort);
+                        if (sc >= 1000) exact++;
+                        else if (sc >= 600) contains++;
+                        else fuzzy++;
+                    }
+                    Log(string.Format("  · 与「{0}」的相关度：完全同名 {1} 条、标题含该词 {2} 条、仅沾边 {3} 条",
+                        kwForSort, exact, contains, fuzzy));
+                    if (exact == 0 && contains == 0)
+                        Log("  ⚠ 这一站没有标题含「" + kwForSort +
+                            "」的书 —— 下面全是按字沾边的。换个源再搜，或把书名写全。");
+                }
+                if (ranked != null && ranked.Count > 0 && shown == 0)
                     Log("  !! 收到了结果但一项都没进列表 —— 这是程序 bug，请把这段日志发给我");
             });
+        }
+
+        /// <summary>
+        /// 按标题与搜索词的相关度排序（**稳定排序**：同分保持站点原顺序）。
+        ///
+        /// 为什么要自己排：站点不给相关度，只给一堆按单字匹配的结果。
+        /// 实测笔尖中文搜「万妖圣祖」，前 8 条是
+        /// 《圣妖之祖》《万妖之祖》《万妖剑祖》《万骨妖祖》《蜀山万妖之祖》
+        /// 《妖祖》《大明圣祖》《人道圣祖》—— 精确匹配（如果有）会被埋在后面，
+        /// 用户翻不到，看起来就是"搜不到"。
+        /// </summary>
+        internal static List<BookInfo> RankByRelevance(List<BookInfo> list, string keyword)
+        {
+            if (list == null || list.Count == 0) return list;
+            string kw = (keyword ?? "").Trim();
+            if (kw.Length == 0) return list;
+
+            // 稳定排序：ListView 里同分的保持站点给的顺序，结果不会跳来跳去
+            var idx = new Dictionary<BookInfo, int>();
+            for (int i = 0; i < list.Count; i++) if (!idx.ContainsKey(list[i])) idx[list[i]] = i;
+
+            var copy = new List<BookInfo>(list);
+            copy.Sort(delegate (BookInfo a, BookInfo b)
+            {
+                int sa = TitleScore(a == null ? null : a.Title, kw);
+                int sb = TitleScore(b == null ? null : b.Title, kw);
+                if (sa != sb) return sb.CompareTo(sa);       // 分高的在前
+                int ia = idx.ContainsKey(a) ? idx[a] : 0;
+                int ib = idx.ContainsKey(b) ? idx[b] : 0;
+                return ia.CompareTo(ib);                     // 同分按原顺序
+            });
+            return copy;
+        }
+
+        /// <summary>
+        /// 标题与搜索词的相关度分数（越大越相关）。纯函数，便于测试。
+        ///
+        ///   1000   标题与搜索词完全相同（去书名号/空格/大小写后）
+        ///    800   标题去掉书名号后**以**搜索词开头
+        ///    600   标题**包含**搜索词（整词，不是单字）
+        ///    400   搜索词包含标题（用户多打了几位）
+        ///  100~200 只沾边：按"搜索词里有几个字出现在标题里"的比例给分
+        ///      0   重合不到一半，当噪音
+        ///
+        /// ★ 为什么要有"按重合比例"这一档：站点是**单字**模糊匹配的。
+        ///   实测搜「万妖圣祖」，笔尖中文返回的前几条是
+        ///   《圣妖之祖》（命中"妖""祖"）《万妖之祖》（命中"万""妖""祖"）
+        ///   《万妖剑祖》《万骨妖祖》…… 而《大明圣祖》只命中"圣""祖"。
+        ///   它们都不是用户要的书，但**沾边程度不一样** —— 得排在不沾边的前面、
+        ///   真命中的后面。
+        ///
+        /// ★ 注意别要求"搜索词每个字都出现"：《圣妖之祖》里**没有"万"字**，
+        ///   那样会被判 0 分。我第一版就是这么写的，被测试抓出来了。
+        /// </summary>
+        internal static int TitleScore(string title, string keyword)
+        {
+            if (string.IsNullOrEmpty(title) || string.IsNullOrEmpty(keyword)) return 0;
+            string t = NormBookTitle(title);
+            string k = NormBookTitle(keyword);
+            if (t.Length == 0 || k.Length == 0) return 0;
+
+            if (t == k) return 1000;
+            if (t.StartsWith(k, StringComparison.Ordinal)) return 800;
+            if (t.IndexOf(k, StringComparison.Ordinal) >= 0) return 600;
+            if (k.IndexOf(t, StringComparison.Ordinal) >= 0) return 400;
+
+            // 只沾边：按"搜索词里有几个字出现在标题里"计分；重合不到一半算噪音。
+            //
+            // ★ 实测值（搜「万妖圣祖」，4 个字）：
+            //     《圣妖之祖》命中「妖」「圣」「祖」= 3/4 → 175
+            //     《万妖之祖》命中「万」「妖」「祖」= 3/4 → 175
+            //     《妖祖》    命中「妖」「祖」      = 2/4 → 150
+            //     《大明圣祖》命中「圣」「祖」      = 2/4 → 150
+            //     《大主宰》  命中 0                → 0（噪音）
+            //
+            // ★ 曾经想再加一档"标题是搜索词的连续一段"（想给《妖祖》更高分），
+            //   实测**没有区分度**：《大明圣祖》里的"圣祖"同样连续包含于
+            //   "万妖圣祖"，于是噪音也被提上来。已删掉。
+            //
+            // ★ 别凭感觉改阈值：这些期望值是在 tests/OfflineTests.cs 里跑出来的，
+            //   我手数错了三次。改这里之前先跑测试。
+            int hit = 0;
+            foreach (char c in k)
+                if (t.IndexOf(c) >= 0) hit++;
+            if (hit * 2 < k.Length) return 0;
+            int partial = 100 + (hit * 100) / k.Length;      // 100 ~ 200
+            return partial > 200 ? 200 : partial;
+        }
+
+        /// <summary>标题归一化：去书名号/书名点/空白，转小写</summary>
+        private static string NormBookTitle(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char c in s)
+            {
+                if (c == '《' || c == '》' || c == '〈' || c == '〉' || c == '「' || c == '」'
+                    || c == '·' || c == '・' || char.IsWhiteSpace(c)) continue;
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.ToString();
         }
 
         /// <summary>
@@ -915,7 +1061,8 @@ namespace TomatoBiquga
             if (kw.Length == 0) { MessageBox.Show("先在搜索框里输入书名或作者，再点「本地查」"); return; }
 
             var list = SearchIndex.Search(kw, 200);
-            FillBooks(list);
+            // 本地查也用同一个词排相关度 —— 索引里命中的同样可能一堆沾边的
+            FillBooks(list, kw);
             if (list.Count > 0)
             {
                 Log("本地索引命中 " + list.Count + " 条（共索引 " + SearchIndex.BookCount + " 本，未联网）。");
@@ -946,14 +1093,14 @@ namespace TomatoBiquga
                 if (cached != null)
                 {
                     Log("搜索「" + kw + "」—— 命中本地缓存（" + cached.Count + " 条），未联网。");
-                    FillBooks(cached);
+                    FillBooks(cached, kw);
                     return;
                 }
 
                 var list = site.Search(kw, Log);
                 // ② 结果落盘：这次搜索下次能重放，同时把书并进累积索引
                 if (list != null && list.Count > 0) SearchIndex.PutQuery(kw, list, searchSiteKey);
-                FillBooks(list);
+                FillBooks(list, kw);
                 if (list.Count == 0)
                 {
                     if (site.Name == "番茄小说")
