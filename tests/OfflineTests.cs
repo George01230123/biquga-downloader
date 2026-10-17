@@ -2626,6 +2626,69 @@ namespace TomatoBiquga
 
             // ---------- 结果区标题栏（列表画不出来时的兜底显示）----------
             TestBooksBar();
+
+            // ---------- 批量抓取的安全前提（性能优化的正确性闸门）----------
+            TestBatchFetchSafety();
+        }
+
+        /// <summary>
+        /// 批量抓取（连接复用，实测快 4.38 倍）的**安全前提**必须成立，否则不能开。
+        ///
+        /// ★ 历史：批量路径曾被判定会让正文**静默截断**（同一章 逐章 105 行 /
+        ///   批量只有 37 行），所以 `BatchFetchEnabled` 一直是 false ——
+        ///   也就是说这条快 3 倍的路是死代码，每章都在新起一个 curl 进程。
+        ///
+        ///   实测定位了根源：截断来自**多页章节**（笔趣阁把一章切成
+        ///   cid.html / cid_1.html / cid_2.html，只取第一页就少了后半段）。
+        ///   而规则站（RuleSite）**结构上没有多页章**：
+        ///     · NextPageKeyOf / NextPageKeyAfter 恒返回 null
+        ///     · LoadChapter 只发 1 个请求
+        ///     · 批量与逐章共用同一个 ChapterTextFromHtml
+        ///   所以对规则站开批量不可能产生不一致的内容。
+        ///
+        ///   实测对拍（联网 BatchDiag 探针）：4 章 × 2 条路径，长度与 MD5 全等。
+        ///   端到端 A/B（PerfBench）：32 章，53.8 ms/章 → 12.3 ms/章，正文逐字一致。
+        ///
+        ///   这个测试把上述前提钉住 —— 谁把 NextPageKeyOf 改成返回非 null，
+        ///   或者把接口从 RuleSite 上摘掉，测试立刻失败。
+        /// </summary>
+        private static void TestBatchFetchSafety()
+        {
+            // ① 规则站必须能被批量路径识别（否则批量永远不会发生）
+            var rule = new RuleSite(SiteRules.All()[0]);
+            Check("批量：RuleSite 实现了 IChapterUrlProvider",
+                rule is IChapterUrlProvider);
+
+            // ② 关键安全前提：规则站没有多页章 —— 截断根源不存在
+            var ch = new ChapterInfo { Id = "5361917", Title = "第一章" };
+            Eq("批量：RuleSite.NextPageKeyOf 恒为 null（无多页章）",
+                null, rule.NextPageKeyOf("<html></html>", ch));
+            Eq("批量：RuleSite.NextPageKeyAfter 恒为 null",
+                null, rule.NextPageKeyAfter("<html></html>", "5361917", 0));
+
+            // ③ 笔趣阁那边必须仍然**不开**（截断根因未定位，不能冒险）
+            var biquga = new BiqugaSite();
+            var runnerBiquga = new DownloadRunner { Site = biquga, Workers = 12 };
+            Check("批量：笔趣阁默认不开（截断根因未定位）",
+                !runnerBiquga.BatchAllowedForTest);
+
+            // ④ 规则站默认开
+            var runnerRule = new DownloadRunner { Site = rule, Workers = 12 };
+            Check("批量：规则站默认开", runnerRule.BatchAllowedForTest);
+
+            // ⑤ 覆盖开关两个方向都要生效（A/B 基准和紧急关闭都靠它）
+            runnerRule.BatchFetchOverride = false;
+            Check("批量：override=false 能强制关掉", !runnerRule.BatchAllowedForTest);
+            runnerBiquga.BatchFetchOverride = true;
+            Check("批量：override=true 能强制打开", runnerBiquga.BatchAllowedForTest);
+
+            // ⑥ 在飞批次数上限 = 工作线程数（保证对站点的并发压力不变）
+            var r1 = new DownloadRunner { Site = rule, Workers = 1 };
+            Eq("批量：1 线程时最多 1 批在飞", 1, r1.BatchMaxInFlightForTest);
+            var r6 = new DownloadRunner { Site = rule, Workers = 6 };
+            Eq("批量：6 线程时最多 6 批在飞", 6, r6.BatchMaxInFlightForTest);
+            var r99 = new DownloadRunner { Site = rule, Workers = 99 };
+            Check("批量：线程数很大时也不无限膨胀", r99.BatchMaxInFlightForTest <= 16);
         }
 
         /// <summary>

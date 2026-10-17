@@ -15,7 +15,7 @@ namespace TomatoBiquga
     /// Content-Type 或页面里的 charset 自动判 utf-8 / gb18030，
     /// 所以本类不需要自己处理编码（实测笔尖中文的正文页就是 GBK）。
     /// </summary>
-    public class RuleSite : ISite, IProbeable, IRuleSite
+    public class RuleSite : ISite, IProbeable, IRuleSite, IChapterUrlProvider
     {
         private readonly SiteRule _r;
 

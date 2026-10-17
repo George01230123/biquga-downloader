@@ -23,6 +23,38 @@ using System.Runtime.InteropServices;
 [assembly: Guid("7b1c9f42-5d3a-4c88-9e21-0a6f4d2b8c11")]
 
 // 版本号：前两位跟 README / Release tag 对齐
+// 1.6.0：下载提速 1.55 倍（连接复用）—— 把"死代码"批量路径真正启用起来。
+//        · 起因（用户要求"优化性能、让程序更精简速度更快"），先量化再动手：
+//            启动 0.4~0.6 秒（没问题）
+//            内存 40MB 工作集（没问题）
+//            二进 462KB（没问题）
+//          → 瓶颈 100% 在**网络**：每章一个 curl 进程，实测 476 ms/章，
+//            其中 DNS 11 + TCP 建连 165 + 服务端 323。
+//            而一个进程连续抓（复用连接）首章 429ms、之后每章只要 **139 ms**。
+//        · 关键发现：项目里早就有 HttpBatch（一个进程抓一批、复用连接），
+//          但 BatchFetchEnabled **全项目没有任何地方设为 true** —— 纯死代码，
+//          等于"每章新起一个 curl 进程"这条最慢的路一直在跑。
+//        · 为什么它当年被关掉：批量路径曾让正文**静默截断**（同章 逐章105行/批量37行），
+//          根因未定位。这一版把根因查清并绕开了：
+//            截断来自**多页章节**（笔趣阁把一章切成 cid.html / cid_1.html / cid_2.html，
+//            只取第一页就少了后半段）。而规则站（RuleSite）结构上没有多页章：
+//            NextPageKeyOf/NextPageKeyAfter 恒 null、LoadChapter 只发 1 个请求、
+//            两条路径共用同一个 ChapterTextFromHtml —— 因此不可能不一致。
+//          所以只对**规则站**开批量，笔趣阁仍然关着（截断根因那边仍未定位）。
+//        · 改动：
+//          ① RuleSite 实现 IChapterUrlProvider（6 个方法本来就有，只是没声明接口）；
+//          ② PrefetchBatch 允许**多批同时在飞**，上限 = 工作线程数
+//             （保证"在途请求数"不变，只是每个线程复用连接）；
+//          ③ 修掉游标推进的老 bug：原来 `_batchCursor += ids.Count` 在跳过章节时会
+//             原地打转，多批并发时更明显；
+//          ④ HttpBatch.BatchSize 8 → 32（实测 8:1.19x / 16:1.45x / 32:1.55x）。
+//        · 实测（300 章、12 并发、PerfBench 探针）：33.0 → 21.3 ms/章 = **1.55 倍**，
+//          300/300 成功，正文逐字一致（0 章不一致）。
+//          BatchDiag 对拍照样守着：4 章 × 2 条路径，长度与 MD5 全等、id 校验全过。
+//        · ★ 记一笔我自己的错误：一度测出 4.4 倍、甚至 20 倍，都是基准脚本
+//          **浅拷贝**导致第二轮章节对象已带 Text、被当成"已完成"跳过 ——
+//          300 章 0.5 秒 = 1.7ms/章，低于单请求物理下限，本该立刻怀疑。
+//          深拷贝后才是真实的 1.55 倍。数字异常时先怀疑量具。
 // 1.5.9：结果区标题栏兼作"兜底显示" + 强制重绘。
 //        · 现象（用户两次反馈）："搜索到了但中间一片空白"，
 //          日志却写着"收到 2 条 → 列表 2 项（标题非空 2 项）、结果区高 278px"。
@@ -188,6 +220,6 @@ using System.Runtime.InteropServices;
 // 1.3.1：修掉目录遍历进度里写死的「共约 772 页」（数字自己打自己）。
 // 1.3.0：AI 裁决错字（本地 Ollama / 云端 OpenAI 兼容，默认关闭）。
 // 1.2.1：修掉"按钮文字被压成省略号"；标题版本号改成从程序集读。
-[assembly: AssemblyVersion("1.5.9.0")]
-[assembly: AssemblyFileVersion("1.5.9.0")]
-[assembly: AssemblyInformationalVersion("1.5.9")]
+[assembly: AssemblyVersion("1.6.0.0")]
+[assembly: AssemblyFileVersion("1.6.0.0")]
+[assembly: AssemblyInformationalVersion("1.6.0")]

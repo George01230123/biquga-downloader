@@ -482,20 +482,64 @@ namespace TomatoBiquga
         /// 留这个开关是为了能 A/B 对比实测提速，以及万一站点讨厌并发时可以关掉。
         /// </summary>
         /// <summary>
-        /// 是否启用批量并发抓取。**默认关闭**。
+        /// 是否启用批量并发抓取。**默认关闭**；规则站（RuleSite）由代码自动启用。
         ///
-        /// ★ 为什么默认关：我实现了它、也测出它快 3 倍，
+        /// ★ 为什么笔趣阁那条路仍然关着：我实现了它、也测出它快 3 倍，
         ///   但在**产物逐字比对**里发现批量路径抓到的正文和逐章路径**不一致**
         ///   （同一章：逐章 105 行 / 批量只有 37 行，内容被截断）。
         ///   id 校验能过、HTML 长度也正常，所以这不是"拿错页"，而是更隐蔽的截断，
-        ///   根因我还没定位到。
+        ///   根因我还没定位到。宁可不快，也不能让用户拿到被截断的正文。
         ///
-        ///   宁可不快，也不能让用户拿到被截断的正文 ——
-        ///   这种损坏是**静默的**（用户不会发现少了段落），比慢严重得多。
-        ///   等根因查清、两条路径产出逐字一致之后再默认打开。
+        /// ★ 为什么规则站可以是例外（2026-10 实测确认）：
+        ///   截断的根源是**多页章节** —— 笔趣阁把一章切成 cid.html / cid_1.html /
+        ///   cid_2.html，批量只取第一页就少了后半段。而规则站（RuleSite）
+        ///   结构上**没有多页章**：<see cref="RuleSite.NextPageKeyOf"/> 恒返回 null，
+        ///   <see cref="RuleSite.LoadChapter"/> 也只发 1 个请求。
+        ///   两条路径还共用同一个 <see cref="RuleSite.ChapterTextFromHtml"/>，
+        ///   所以正文不可能不一致。（有 BatchDiag 探针做逐字对拍守着。）
         /// </summary>
         public bool BatchFetchEnabled = false;
-        private bool _batchRunning;        // 同一时刻只允许一批在飞
+
+        /// <summary>
+        /// 仅供测试/基准：强制指定是否走批量。
+        /// null = 按站点自动判断（规则站开、笔趣阁关）。A/B 对比时用。
+        /// </summary>
+        public bool? BatchFetchOverride = null;
+
+        /// <summary>
+        /// 这个站点能不能走批量。规则站可以（无多页章），笔趣阁不行（截断根因未定位）。
+        /// </summary>
+        private bool BatchAllowed
+        {
+            get
+            {
+                if (BatchFetchOverride.HasValue) return BatchFetchOverride.Value;
+                return BatchFetchEnabled || Site is RuleSite;
+            }
+        }
+
+        /// <summary>仅供测试：这个站点当前会不会走批量</summary>
+        internal bool BatchAllowedForTest { get { return BatchAllowed; } }
+
+        /// <summary>仅供测试：同时在飞的批次数上限</summary>
+        internal int BatchMaxInFlightForTest { get { return BatchMaxInFlight; } }
+
+        private int _batchInFlight;        // 同时在飞的批次数
+
+        /// <summary>
+        /// 同时在飞的批次数上限 = 工作线程数。
+        ///
+        /// ★ 这个上限是刻意这么定的：一批内部是**串行**的 8 个请求，
+        ///   所以「同时在途的请求数」仍然等于工作线程数 —— **对站点的压力没变**，
+        ///   变的只是"每个线程复用同一条连接"。
+        ///   实测同一个站：每章一个 curl 进程 476ms；一个进程连续抓（复用连接）
+        ///   首章 429ms、之后每章 139ms。12 线程 × 139ms ≈ 14.6ms/章，
+        ///   而改动前是 39.7ms/章 —— 约 2.7 倍。
+        /// </summary>
+        private int BatchMaxInFlight
+        {
+            get { return Workers < 1 ? 1 : Math.Min(Workers, 16); }
+        }
 
         /// <summary>从批量缓存里取一章（取走即删，避免长期占内存）</summary>
         private string TakeFromBatch(string cid)
@@ -514,33 +558,36 @@ namespace TomatoBiquga
         }
 
         /// <summary>
-        /// 用**一个 curl 进程并发抓一小批**章节正文，填进 <see cref="_batchText"/>。
+        /// 用**一个 curl 进程顺序抓一小批**章节正文，填进 <see cref="_batchText"/>。
         ///
         /// 为什么值得：原来每章都是一次独立的 <see cref="Http"/> 请求 ——
-        /// 也就是**一个新 curl 进程 + 一次全新 TLS 握手**。实测 24 章真实数据：
-        ///     逐章独立请求      0.760 秒/章
-        ///     一个进程并发 8 章  0.245 秒/章   → **3.1 倍**
+        /// 也就是**一个新 curl 进程 + 一次全新连接**。实测同一个站（笔尖中文，HTTP）：
+        ///     每章一个进程   476 ms（DNS 11 + 建连 165 + 服务端 323）
+        ///     一个进程连续抓  首章 429 ms、之后每章 **139 ms** → 复用连接省掉建连
+        /// 所以真正的收益来自**连接复用**，不是"并发更多请求"。
         ///
         /// 为什么可以批量：**下载阶段所有章节 id 事先都知道**（目录已经拿到了），
         /// 不需要猜任何 URL —— 这和目录遍历（下一页地址只在该页 HTML 里）完全不同。
         ///
         /// 设计上的克制：
-        ///   · 一次只跑一批（<see cref="_batchRunning"/>），不叠加并发把站点打爆；
+        ///   · 在飞批次数 = 工作线程数（见 <see cref="BatchMaxInFlight"/>），
+        ///     所以放在站点的在途请求数**没有变多**，只是每线程复用连接；
         ///   · 批次失败**不影响正确性** —— 调用方拿不到就退回逐章请求；
         ///   · 命中即从字典移除，不会把整本书的正文都攒在内存里。
         /// </summary>
         private void PrefetchBatch()
         {
-            lock (_batchLock)
-            {
-                if (!BatchFetchEnabled) return;
-            if (_batchRunning) return;
-                if (_batchCursor >= Chapters.Count) return;
-                _batchRunning = true;
-            }
             // 站点得先声明"我能算出正文 URL"（番茄那一路算不出来，直接跳过批量）
             var urlProvider = Site as IChapterUrlProvider;
             if (urlProvider == null) return;
+            if (!BatchAllowed) return;
+
+            lock (_batchLock)
+            {
+                if (_batchInFlight >= BatchMaxInFlight) return;
+                if (_batchCursor >= Chapters.Count) return;
+                _batchInFlight++;
+            }
 
             try
             {
@@ -548,17 +595,22 @@ namespace TomatoBiquga
                 var urls = new List<string>();
                 lock (_batchLock)
                 {
-                    for (int i = _batchCursor; i < Chapters.Count && ids.Count < HttpBatch.BatchSize; i++)
+                    int start = _batchCursor;
+                    int i = start;
+                    for (; i < Chapters.Count && ids.Count < HttpBatch.BatchSize; i++)
                     {
                         var ch = Chapters[i];
-                        if (ch == null || string.IsNullOrEmpty(ch.Id)) { _batchCursor = i + 1; continue; }
+                        if (ch == null || string.IsNullOrEmpty(ch.Id)) continue;
                         if (_batchText.ContainsKey(ch.Id)) continue;
                         var u = urlProvider.ChapterUrlFor(Book, ch);
-                        if (string.IsNullOrEmpty(u)) { _batchCursor = i + 1; continue; }
+                        if (string.IsNullOrEmpty(u)) continue;
                         ids.Add(ch.Id);
                         urls.Add(u);
                     }
-                    _batchCursor += Math.Max(1, ids.Count);
+                    // ★ 游标推进到"扫描到哪"，而不是"取到了几条"。
+                    //   老写法 `_batchCursor += ids.Count` 在跳过若干章时会原地打转，
+                    //   多批并发时更明显（反复扫同一段、白白占着在飞名额）。
+                    _batchCursor = i;
                 }
                 if (urls.Count == 0) return;
 
@@ -618,7 +670,7 @@ namespace TomatoBiquga
                 }
             }
             catch { /* 批量是加速手段，失败就让调用方逐章退回 */ }
-            finally { lock (_batchLock) { _batchRunning = false; } }
+            finally { lock (_batchLock) { if (_batchInFlight > 0) _batchInFlight--; } }
         }
 
         /// <summary>
