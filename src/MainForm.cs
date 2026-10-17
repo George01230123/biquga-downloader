@@ -469,7 +469,15 @@ namespace TomatoBiquga
             lstBooks.DoubleClick += (s, e) => DoLoadBook();
 
             var bookBar = new Panel { Dock = DockStyle.Top, Height = 24 };
-            bookBar.Controls.Add(new Label { Text = "搜索结果（双击载入目录）", Dock = DockStyle.Fill, ForeColor = Color.DimGray });
+            // 标题从"搜索结果（双击载入目录）"改成能带计数的 —— 见 lblBooksBar 的注释
+            lblBooksBar = new Label
+            {
+                Text = "搜索结果（双击载入目录）",
+                Dock = DockStyle.Fill,
+                ForeColor = Color.DimGray,
+                AutoEllipsis = true,
+            };
+            bookBar.Controls.Add(lblBooksBar);
             split.Panel1.Controls.Add(lstBooks);
             split.Panel1.Controls.Add(bookBar);
 
@@ -654,6 +662,18 @@ namespace TomatoBiquga
         internal SplitContainer SplitterForTest()
         {
             return _split;
+        }
+
+        /// <summary>仅供自动化测试：填搜索结果（验证列表与兜底摘要）</summary>
+        internal void FillBooksForTest(List<BookInfo> list, string keyword)
+        {
+            FillBooks(list, keyword);
+        }
+
+        /// <summary>仅供自动化测试：结果区标题栏当前文字</summary>
+        internal string BooksBarTextForTest
+        {
+            get { return _lastBooksSummary ?? ""; }
         }
 
         /// <summary>
@@ -867,6 +887,16 @@ namespace TomatoBiquga
         /// 联网搜索的结果、以及本地缓存/索引命中的结果 —— 两条路径必须
         /// 用同一段代码填，否则"缓存命中的那批书"显示出来会和联网的不一样。
         /// </summary>
+        private Label lblBooksBar;
+        private string _lastBooksSummary = "搜索结果（双击载入目录）";
+
+        /// <summary>更新结果区标题栏的摘要文字（它兼作"兜底显示"，见 FillBooks 里的注释）。</summary>
+        private void SetBooksBarText(string text)
+        {
+            _lastBooksSummary = text;
+            try { if (lblBooksBar != null) lblBooksBar.Text = text; } catch { }
+        }
+
         private void FillBooks(List<BookInfo> list) { FillBooks(list, null); }
 
         /// <summary>
@@ -919,6 +949,35 @@ namespace TomatoBiquga
                     lstBooks.Items.Add(it);
                 }
                 if (lstBooks.Items.Count > 0) lstBooks.Items[0].Selected = true;
+
+                // ★ 兜底显示：把"搜到几条、第一条是什么"写进标题栏。
+                //   用户两次反馈"搜到了但中间一片空白"，而日志说列表有 N 项。
+                //   我在这边复现不出来（控件 Visible、句柄、坐标、DrawToBitmap 全正常），
+                //   所以不能只依赖 ListView 的渲染 —— 标题栏也要能说清结果。
+                //   即使列表没画出来，用户至少知道"搜到了哪本书、能不能继续"。
+                int total = ranked == null ? 0 : ranked.Count;
+                if (total == 0)
+                {
+                    SetBooksBarText("搜索结果：没有结果（换个书名或换个源）");
+                }
+                else
+                {
+                    var top = ranked[0];
+                    string extra = "";
+                    if (top != null && !string.IsNullOrEmpty(top.Author)) extra += " " + top.Author;
+                    SetBooksBarText(string.Format("搜索结果 {0} 条 —— 最相关：《{1}》{2}（双击载入目录）",
+                        total, top == null ? "?" : top.Title, extra));
+                }
+
+                // ★ 强制重绘一次。
+                //   起因同上：数据确实进了控件，但个别环境下没刷出来。
+                //   Invalidate + Update 是"标记无效并立刻重画"，比单靠自动重绘稳。
+                try
+                {
+                    lstBooks.Invalidate(true);
+                    lstBooks.Update();
+                }
+                catch { }
 
                 // ★ 落库后立刻回读一次并写日志。
                 //   起因：用户两次反馈"日志说搜到 N 条、列表却是空的"，

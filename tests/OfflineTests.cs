@@ -2623,6 +2623,72 @@ namespace TomatoBiquga
 
             // ---------- 跨站找书：一站没有时能不能发现别的站有 ----------
             TestCrossSiteFilter();
+
+            // ---------- 结果区标题栏（列表画不出来时的兜底显示）----------
+            TestBooksBar();
+        }
+
+        /// <summary>
+        /// 结果区标题栏必须如实反映"搜到几条、最相关是哪本"。
+        ///
+        /// ★ 为什么需要它：用户两次反馈"搜索到了但中间一片空白"，
+        ///   而日志写着"收到 2 条 → 列表 2 项（标题非空 2 项）"。
+        ///   我用探针逐层排查过：控件 Visible=True、句柄已建、坐标在窗口内、
+        ///   DrawToBitmap 出来的图上**文字清楚可见**、后台线程经 UiInvoke 投递也正常。
+        ///   也就是说在**我这边**怎么都复现不出来。
+        ///
+        ///   既然复现不了，就不能让"看见结果"完全依赖 ListView 的渲染 ——
+        ///   标题栏也报一份摘要。即使列表没画出来，用户至少知道搜到了什么。
+        /// </summary>
+        private static void TestBooksBar()
+        {
+            MainForm f = null;
+            try
+            {
+                f = new MainForm();
+                f.SuppressDialogs = true;
+                f.Show();
+                Application.DoEvents();
+
+                // ① 正常结果：条数 + 最相关书名 + 作者
+                f.FillBooksForTest(new List<BookInfo>
+                {
+                    new BookInfo { Title = "万妖圣祖", Author = "十月流年", Site = "biquge365", Url = "http://x/1" },
+                    new BookInfo { Title = "万妖圣祖项尘", Author = "十月流年", Site = "biquge365", Url = "http://x/2" },
+                }, "万妖圣祖");
+                Application.DoEvents();
+                string bar = f.BooksBarTextForTest;
+                Check("结果栏：报出条数", bar.Contains("2 条"));
+                Check("结果栏：报出最相关书名", bar.Contains("万妖圣祖"));
+                Check("结果栏：带上作者", bar.Contains("十月流年"));
+
+                // ② 零结果：必须明说"没有结果"，不能留空让人猜
+                f.FillBooksForTest(new List<BookInfo>(), "查无此书");
+                Application.DoEvents();
+                Check("结果栏：零结果时明说没有结果",
+                    f.BooksBarTextForTest.Contains("没有结果"));
+
+                // ③ 关键：结果乱序时摘要取"最相关"，不是"第一条"
+                //    （笔尖中文对「万妖圣祖」的真实返回顺序就是这样）
+                f.FillBooksForTest(new List<BookInfo>
+                {
+                    new BookInfo { Title = "圣妖之祖", Author = "灯鱼", Site = "xbiquwk", Url = "http://x/a" },
+                    new BookInfo { Title = "大明圣祖", Author = "某人", Site = "xbiquwk", Url = "http://x/b" },
+                    new BookInfo { Title = "万妖圣祖", Author = "十月流年", Site = "biquga", Url = "http://x/c" },
+                }, "万妖圣祖");
+                Application.DoEvents();
+                bar = f.BooksBarTextForTest;
+                Check("结果栏：乱序时摘要取最相关（不是第一条噪音）",
+                    bar.Contains("万妖圣祖") && !bar.Contains("圣妖之祖"));
+            }
+            catch (Exception ex)
+            {
+                Check("结果栏：能构造主窗体（" + ex.Message + "）", false);
+            }
+            finally
+            {
+                try { if (f != null) f.Dispose(); } catch { }
+            }
         }
 
         /// <summary>
